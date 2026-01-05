@@ -11,32 +11,35 @@ Prediction market arbitrage detection system between Polymarket, Kalshi, and rea
 
 ## Quick Start
 
+**No API keys required for market data!** All prediction market and exchange data is publicly available.
+
 ```bash
 # Install dependencies
 uv sync
 
-# Copy environment file
-cp .env.example .env
-
-# Run demo mode (no API keys needed)
-uv run python main.py --mode demo
-
-# Run single scan
+# Run single scan (works immediately - no setup needed!)
 uv run python main.py --mode single
 
 # Run continuous monitoring
 uv run python main.py --mode continuous
+
+# Run demo mode with simulated data
+uv run python main.py --mode demo
 ```
 
-## Configuration
+## Configuration (Optional)
 
-See `.env.example` for all configuration options. Key settings:
+API keys are **only needed for placing trades**, not for watching market data.
 
-- `POLYMARKET_API_KEY`: Polymarket API credentials
-- `KALSHI_API_KEY`: Kalshi API credentials
-- `BINANCE_API_KEY`: Binance credentials for options data
+For alerts, copy `.env.example` to `.env` and configure:
+
 - `DISCORD_WEBHOOK_URL`: Discord alert notifications
 - `TELEGRAM_BOT_TOKEN`: Telegram alert notifications
+
+For trading (optional):
+- `POLYMARKET_API_KEY`: Polymarket trading credentials
+- `KALSHI_API_KEY`: Kalshi trading credentials
+- `BINANCE_API_KEY`: Binance trading credentials
 
 ## Architecture
 

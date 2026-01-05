@@ -56,17 +56,17 @@ class Settings(BaseSettings):
 
     @property
     def has_polymarket_credentials(self) -> bool:
-        """Check if Polymarket credentials are configured."""
+        """Check if Polymarket credentials are configured (only needed for trading)."""
         return bool(self.polymarket_api_key and self.polymarket_api_secret)
 
     @property
     def has_kalshi_credentials(self) -> bool:
-        """Check if Kalshi credentials are configured."""
+        """Check if Kalshi credentials are configured (only needed for trading)."""
         return bool(self.kalshi_api_key and self.kalshi_api_secret)
 
     @property
     def has_binance_credentials(self) -> bool:
-        """Check if Binance credentials are configured."""
+        """Check if Binance credentials are configured (only needed for trading)."""
         return bool(self.binance_api_key and self.binance_api_secret)
 
     @property

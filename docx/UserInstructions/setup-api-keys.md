@@ -1,39 +1,51 @@
-# User Action Required: Set Up API Keys
+# User Action Required: Set Up API Keys (Optional)
 
 ## Overview
 
-To use Aubit-Poly with real data, you need to configure API credentials for the prediction markets and exchanges you want to monitor.
+**Good news: No API keys are needed for market data!**
+
+All prediction market data (Polymarket, Kalshi) and crypto exchange data (Binance) is publicly available. You can run the arbitrage detector immediately without any setup.
+
+API keys are **only required if you want to place trades**.
 
 ## Prerequisites
 
 - [ ] Python 3.11+ installed
 - [ ] `uv` package manager installed (`pip install uv` or `brew install uv`)
 
-## Steps
-
-### 1. Install Dependencies
+## Quick Start (No API Keys)
 
 ```bash
 cd /Users/xb/table/aubit-poly
 uv sync
+uv run python main.py --mode single
 ```
 
-### 2. Create Environment File
+That's it! The scanner will fetch live market data and detect arbitrage opportunities.
+
+---
+
+## Optional: Configure Alerts
+
+To receive notifications when opportunities are found:
 
 ```bash
 cp .env.example .env
 ```
 
-### 3. Configure Polymarket (Primary)
+Then configure Discord or Telegram (see below).
 
-Polymarket provides free API access for market data.
+---
+
+## Optional: Configure Trading APIs
+
+Only needed if you want to place trades programmatically.
+
+### Polymarket (Trading Only)
 
 1. Visit [Polymarket Docs](https://docs.polymarket.com)
-2. For basic market data (no trading), you can start without credentials
-3. For trading/advanced features:
-   - Create a Polymarket account
-   - Connect a wallet
-   - Generate API credentials from the developer settings
+2. Create a Polymarket account and connect a wallet
+3. Generate API credentials from developer settings
 
 Add to `.env`:
 ```
