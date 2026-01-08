@@ -241,6 +241,7 @@ class DBMarketMonitor:
             "above": MarketType.ABOVE,
             "price_range": MarketType.PRICE_RANGE,
             "sports": MarketType.SPORTS,
+            "binary": MarketType.BINARY,
         }
         return mapping.get(db_type.lower(), MarketType.UP_DOWN)
 
@@ -258,8 +259,15 @@ class DBMarketMonitor:
             "ETH": Asset.ETH,
             "SOL": Asset.SOL,
             "XRP": Asset.XRP,
+            "DOGE": Asset.OTHER,  # Map additional cryptos to OTHER
+            "ADA": Asset.OTHER,
+            "AVAX": Asset.OTHER,
+            "MATIC": Asset.OTHER,
+            "DOT": Asset.OTHER,
+            "LINK": Asset.OTHER,
             "SPORTS": Asset.SPORTS,
             "OTHER": Asset.OTHER,
+            "UNKNOWN": Asset.OTHER,
         }
         return mapping.get(db_asset.upper(), Asset.OTHER)
 
@@ -273,8 +281,13 @@ class DBMarketMonitor:
             Timeframe enum value.
         """
         mapping = {
+            "5m": Timeframe.FIVE_MIN,
+            "5min": Timeframe.FIVE_MIN,
+            "15m": Timeframe.FIFTEEN_MIN,
             "15min": Timeframe.FIFTEEN_MIN,
+            "1h": Timeframe.HOURLY,
             "hourly": Timeframe.HOURLY,
+            "4h": Timeframe.FOUR_HOUR,
             "daily": Timeframe.DAILY,
             "event": Timeframe.EVENT,
         }
