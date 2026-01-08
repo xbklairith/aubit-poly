@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from src.models.market import Market, MarketOutcome, Platform
-from src.models.opportunity import (
+from pylo.models.market import Market, MarketOutcome, Platform
+from pylo.models.opportunity import (
     ArbitrageType,
     CrossPlatformArbOpportunity,
     InternalArbOpportunity,

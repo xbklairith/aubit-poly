@@ -23,6 +23,8 @@ dependencies = [
     # Database
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.20.0",
+    "asyncpg>=0.30.0",
+    "greenlet>=3.0.0",
 
     # Alerts (optional)
     "aiohttp>=3.10.0",
@@ -86,10 +88,10 @@ select = [
 ignore = ["E501"]  # line length handled by formatter
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["pylo"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["pylo"]
 
 [build-system]
 requires = ["hatchling"]

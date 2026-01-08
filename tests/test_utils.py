@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.utils.probability import (
+from pylo.utils.probability import (
     arbitrage_profit,
     calculate_ev,
     calculate_kelly_fraction,
@@ -74,21 +74,55 @@ class TestProbabilityUtils:
 
     def test_arbitrage_profit_exists(self) -> None:
         """Test arbitrage profit calculation when opportunity exists."""
-        profit, yes_alloc, no_alloc = arbitrage_profit(
+        profit, yes_alloc, no_alloc, gross = arbitrage_profit(
             yes_price=Decimal("0.45"),
             no_price=Decimal("0.50"),
             total_investment=Decimal("100"),
         )
         # Total cost = 0.95, profit = 0.05 per dollar
-        assert profit == Decimal("5")  # 5% of $100
+        assert gross == Decimal("5")  # 5% of $100 gross profit
+        assert profit == Decimal("5")  # No fees, so same as gross
 
     def test_arbitrage_profit_none(self) -> None:
         """Test arbitrage profit when no opportunity."""
-        profit, yes_alloc, no_alloc = arbitrage_profit(
+        profit, yes_alloc, no_alloc, gross = arbitrage_profit(
             yes_price=Decimal("0.50"),
             no_price=Decimal("0.52"),
         )
         assert profit == Decimal("0")
+        assert gross == Decimal("0")
+
+    def test_arbitrage_profit_proportional_allocation(self) -> None:
+        """Test that allocation is proportional to prices."""
+        profit, yes_alloc, no_alloc, gross = arbitrage_profit(
+            yes_price=Decimal("0.40"),
+            no_price=Decimal("0.55"),
+            total_investment=Decimal("100"),
+        )
+        # YES allocation should be 40/95 of investment
+        # NO allocation should be 55/95 of investment
+        expected_yes = Decimal("100") * (Decimal("0.40") / Decimal("0.95"))
+        expected_no = Decimal("100") * (Decimal("0.55") / Decimal("0.95"))
+        assert yes_alloc == expected_yes
+        assert no_alloc == expected_no
+        # Both should buy the same number of shares (guaranteed equal payout)
+        shares_from_yes = yes_alloc / Decimal("0.40")
+        shares_from_no = no_alloc / Decimal("0.55")
+        assert shares_from_yes == shares_from_no
+
+    def test_arbitrage_profit_with_fees(self) -> None:
+        """Test arbitrage profit with trading fees."""
+        profit, yes_alloc, no_alloc, gross = arbitrage_profit(
+            yes_price=Decimal("0.45"),
+            no_price=Decimal("0.50"),
+            total_investment=Decimal("100"),
+            fee_rate=Decimal("0.01"),  # 1% fee
+        )
+        # Gross profit = 5% of $100 = $5
+        assert gross == Decimal("5")
+        # Fees = 1% of $100 = $1
+        # Profit after fees = $5 - $1 = $4
+        assert profit == Decimal("4")
 
     def test_normalize_probabilities(self) -> None:
         """Test probability normalization."""

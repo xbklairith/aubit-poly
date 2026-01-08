@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from src.arbitrage.internal import InternalArbDetector
-from src.models.market import Market, MarketOutcome, Platform
+from pylo.arbitrage.internal import InternalArbDetector
+from pylo.models.market import Market, MarketOutcome, Platform
 
 
 class TestInternalArbDetector:

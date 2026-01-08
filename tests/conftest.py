@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.models.market import Market, MarketOutcome, Platform
+from pylo.models.market import Market, MarketOutcome, Platform
 
 
 @pytest.fixture
