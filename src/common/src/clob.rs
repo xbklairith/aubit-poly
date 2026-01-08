@@ -311,6 +311,85 @@ impl ClobClient {
         Ok(())
     }
 
+    /// Subscribe to orderbook updates while concurrently reading incoming messages.
+    /// This prevents data loss during the subscription phase by draining the buffer
+    /// between each batch send.
+    /// Returns buffered messages received during subscription.
+    pub async fn subscribe_with_read(
+        &self,
+        ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+        asset_ids: Vec<String>,
+    ) -> Result<Vec<ClobMessage>, ClobError> {
+        const BATCH_SIZE: usize = 100;
+        let mut buffered_messages = Vec::new();
+        let total_batches = (asset_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+
+        info!(
+            "Subscribing to {} assets in {} batches (with concurrent read)",
+            asset_ids.len(),
+            total_batches
+        );
+
+        for (batch_num, chunk) in asset_ids.chunks(BATCH_SIZE).enumerate() {
+            let request = SubscribeRequest::market(chunk.to_vec());
+            let msg = serde_json::to_string(&request)
+                .map_err(|e| ClobError::ParseError(e.to_string()))?;
+
+            debug!(
+                "Sending subscription batch {}/{} ({} assets)",
+                batch_num + 1,
+                total_batches,
+                chunk.len()
+            );
+
+            // Send the batch
+            ws.send(Message::Text(msg.into()))
+                .await
+                .map_err(ClobError::ConnectionError)?;
+
+            // Drain any pending messages (non-blocking)
+            loop {
+                match timeout(Duration::from_millis(10), ws.next()).await {
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        buffered_messages.push(parse_message(&text));
+                    }
+                    Ok(Some(Ok(Message::Ping(data)))) => {
+                        ws.send(Message::Pong(data))
+                            .await
+                            .map_err(ClobError::ConnectionError)?;
+                    }
+                    _ => break, // Timeout or other - continue to next batch
+                }
+            }
+
+            // Small delay between batches
+            if batch_num + 1 < total_batches {
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        // Final drain to catch any remaining messages
+        loop {
+            match timeout(Duration::from_millis(100), ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    buffered_messages.push(parse_message(&text));
+                }
+                Ok(Some(Ok(Message::Ping(data)))) => {
+                    ws.send(Message::Pong(data))
+                        .await
+                        .map_err(ClobError::ConnectionError)?;
+                }
+                _ => break,
+            }
+        }
+
+        info!(
+            "Subscription complete, buffered {} messages during subscribe",
+            buffered_messages.len()
+        );
+        Ok(buffered_messages)
+    }
+
     /// Read the next message from the WebSocket.
     pub async fn read_message(
         &self,

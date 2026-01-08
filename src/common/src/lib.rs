@@ -19,6 +19,6 @@ pub use db::Database;
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{
     deactivate_expired_markets, get_active_markets, get_active_markets_expiring_within,
-    get_latest_orderbook_snapshot, get_market_by_condition_id, insert_orderbook_snapshot,
-    upsert_market,
+    get_latest_orderbook_snapshot, get_market_by_condition_id, get_priority_markets_hybrid,
+    insert_orderbook_snapshot, upsert_market,
 };

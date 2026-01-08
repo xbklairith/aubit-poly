@@ -85,13 +85,15 @@ class Settings(BaseSettings):
     # Starting balance for dry-run simulation
     spread_bot_starting_balance: Decimal = Decimal("10000")
 
-    # Assets to monitor (comma-separated: BTC,ETH,SOL,XRP)
-    spread_bot_assets: str = "BTC,ETH,SOL,XRP"
+    # Assets to monitor (comma-separated)
+    # Crypto: BTC, ETH, SOL, XRP
+    # Events: SPORTS (Super Bowl, etc.), UNKNOWN (political, other)
+    spread_bot_assets: str = "BTC,ETH,SOL,XRP,SPORTS,UNKNOWN"
 
     # Maximum time to expiry to consider (in seconds)
     # Only monitor markets expiring within this window
-    # 86400 = 24 hours (to support daily markets)
-    spread_bot_max_time_to_expiry: int = Field(default=86400, ge=300, le=604800)
+    # 5184000 = 60 days (supports event markets like Super Bowl, elections)
+    spread_bot_max_time_to_expiry: int = Field(default=5184000, ge=300, le=7776000)
 
     # Poll interval in seconds
     spread_bot_poll_interval: int = Field(default=1, ge=1, le=60)

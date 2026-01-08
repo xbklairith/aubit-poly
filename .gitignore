@@ -79,3 +79,4 @@ secrets/
 *.key
 logs/
 target/
+docx/

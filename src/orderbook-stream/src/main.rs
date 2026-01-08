@@ -14,8 +14,8 @@ use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 use common::{
-    get_active_markets_expiring_within, insert_orderbook_snapshot, ClobClient, ClobMessage,
-    Config, Database, PriceLevel,
+    get_active_markets_expiring_within, get_priority_markets_hybrid, insert_orderbook_snapshot,
+    ClobClient, ClobMessage, Config, Database, PriceLevel,
 };
 
 /// Orderbook Stream - real-time orderbook data via WebSocket
@@ -40,6 +40,26 @@ struct Args {
     /// Prevents WebSocket overload with too many subscriptions
     #[arg(long, default_value = "1000")]
     max_markets: i64,
+
+    /// Enable hybrid mode: stream crypto (short-term) + event markets (long-term)
+    #[arg(long)]
+    hybrid: bool,
+
+    /// Hours until expiry for crypto markets in hybrid mode (default: 12)
+    #[arg(long, default_value = "12")]
+    crypto_hours: i32,
+
+    /// Days until expiry for event markets in hybrid mode (default: 60)
+    #[arg(long, default_value = "60")]
+    event_days: i32,
+
+    /// Max crypto markets in hybrid mode (default: 1500)
+    #[arg(long, default_value = "1500")]
+    crypto_limit: i64,
+
+    /// Max event markets in hybrid mode (default: 1500)
+    #[arg(long, default_value = "1500")]
+    event_limit: i64,
 }
 
 #[tokio::main]
@@ -94,14 +114,30 @@ async fn main() -> Result<()> {
 
 /// Run the orderbook streaming loop.
 async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()> {
-    // Get active markets from database (filtered by expiry time and limited)
-    info!(
-        "Fetching active markets (expiring within {} hours, max {})...",
-        args.max_expiry_hours, args.max_markets
-    );
-    let markets =
+    // Get active markets from database
+    let markets = if args.hybrid {
+        // Hybrid mode: crypto markets (short-term) + event markets (long-term)
+        info!(
+            "Fetching markets in HYBRID mode: crypto ({}h, max {}) + events ({}d, max {})...",
+            args.crypto_hours, args.crypto_limit, args.event_days, args.event_limit
+        );
+        get_priority_markets_hybrid(
+            db.pool(),
+            args.crypto_hours,
+            args.event_days,
+            args.crypto_limit,
+            args.event_limit,
+        )
+        .await?
+    } else {
+        // Standard mode: all markets within time window
+        info!(
+            "Fetching active markets (expiring within {} hours, max {})...",
+            args.max_expiry_hours, args.max_markets
+        );
         get_active_markets_expiring_within(db.pool(), args.max_expiry_hours, args.max_markets)
-            .await?;
+            .await?
+    };
 
     if markets.is_empty() {
         warn!("No active markets found in database. Run market-scanner first.");
@@ -134,13 +170,29 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     let mut ws = clob.connect_with_retry(5).await?;
     info!("Connected to CLOB WebSocket");
 
-    // Subscribe to market updates
-    clob.subscribe(&mut ws, asset_ids).await?;
-    info!("Subscribed to orderbook updates");
+    // Subscribe to market updates (with concurrent read to prevent data loss)
+    let buffered = clob.subscribe_with_read(&mut ws, asset_ids).await?;
 
     // Track orderbook state per market
     let mut orderbooks: HashMap<Uuid, MarketOrderbook> = HashMap::new();
     let mut snapshot_count = 0;
+
+    // Process buffered messages from subscription phase
+    for msg in buffered {
+        match msg {
+            ClobMessage::Books(books) => {
+                info!("Processing buffered batch of {} book snapshots", books.len());
+                for book in books {
+                    process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                }
+            }
+            ClobMessage::Book(book) => {
+                process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+            }
+            _ => {}
+        }
+    }
+    info!("Processed buffered messages, snapshot_count={}", snapshot_count);
     let mut last_ping = std::time::Instant::now();
     let ping_interval = Duration::from_secs(10);
 

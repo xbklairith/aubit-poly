@@ -70,9 +70,9 @@ module.exports = {
         RUST_LOG: 'info',
         DATABASE_URL: DATABASE_URL,
       },
-      // Stream markets expiring within 12 hours (includes ABOVE/PRICE_RANGE)
-      // Max 2000 markets to avoid WebSocket overload
-      args: '--max-expiry-hours 12 --max-markets 2000',
+      // Hybrid mode: crypto (12h) + event markets (60 days)
+      // Supports both short-term crypto and long-dated events (Super Bowl, elections)
+      args: '--hybrid --crypto-hours 12 --event-days 60 --crypto-limit 1500 --event-limit 1500',
     },
 
     // Python Trade Executor Service (DB-backed)

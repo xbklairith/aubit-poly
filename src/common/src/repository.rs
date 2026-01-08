@@ -133,6 +133,87 @@ pub async fn get_active_markets_expiring_within(
     Ok(markets)
 }
 
+/// Get priority markets using hybrid strategy:
+/// - Crypto markets (BTC, ETH, SOL, XRP) expiring within crypto_hours
+/// - Event markets (all other assets) expiring within event_days
+/// This enables monitoring short-term crypto markets alongside longer-dated event markets.
+pub async fn get_priority_markets_hybrid(
+    pool: &PgPool,
+    crypto_hours: i32,
+    event_days: i32,
+    crypto_limit: i64,
+    event_limit: i64,
+) -> Result<Vec<Market>, sqlx::Error> {
+    // Fetch crypto and event markets separately, then combine
+    // This avoids UNION ALL issues with sqlx type inference
+    let crypto_markets = sqlx::query_as!(
+        Market,
+        r#"
+        SELECT
+            id,
+            condition_id,
+            market_type,
+            asset,
+            timeframe,
+            yes_token_id,
+            no_token_id,
+            name,
+            end_time,
+            COALESCE(is_active, true) as "is_active!",
+            COALESCE(discovered_at, NOW()) as "discovered_at!",
+            COALESCE(updated_at, NOW()) as "updated_at!"
+        FROM markets
+        WHERE is_active = true
+          AND asset IN ('BTC', 'ETH', 'SOL', 'XRP')
+          AND end_time > NOW()
+          AND end_time <= NOW() + ($1 || ' hours')::interval
+        ORDER BY end_time ASC
+        LIMIT $2
+        "#,
+        crypto_hours.to_string(),
+        crypto_limit
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let event_markets = sqlx::query_as!(
+        Market,
+        r#"
+        SELECT
+            id,
+            condition_id,
+            market_type,
+            asset,
+            timeframe,
+            yes_token_id,
+            no_token_id,
+            name,
+            end_time,
+            COALESCE(is_active, true) as "is_active!",
+            COALESCE(discovered_at, NOW()) as "discovered_at!",
+            COALESCE(updated_at, NOW()) as "updated_at!"
+        FROM markets
+        WHERE is_active = true
+          AND asset NOT IN ('BTC', 'ETH', 'SOL', 'XRP')
+          AND end_time > NOW()
+          AND end_time <= NOW() + ($1 || ' days')::interval
+        ORDER BY end_time ASC
+        LIMIT $2
+        "#,
+        event_days.to_string(),
+        event_limit
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Combine and sort by end_time
+    let mut markets = crypto_markets;
+    markets.extend(event_markets);
+    markets.sort_by(|a, b| a.end_time.cmp(&b.end_time));
+
+    Ok(markets)
+}
+
 /// Count active markets by type.
 pub async fn count_markets_by_type(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
     let counts = sqlx::query!(
