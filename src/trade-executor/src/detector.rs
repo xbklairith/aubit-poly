@@ -52,14 +52,18 @@ impl SpreadDetector {
         // spread = cost to buy both YES and NO
         let spread = yes_ask + no_ask;
 
-        // profit = guaranteed payout ($1) - cost
-        // profit_pct = profit as a percentage of spread (cost basis)
-        let profit = dec!(1.00) - spread;
-        let profit_pct = if spread > dec!(0) {
-            profit / spread
-        } else {
-            dec!(0)
-        };
+        // profit = guaranteed payout ($1) - cost (same formula as Python)
+        // This is the absolute profit in dollars
+        let profit_pct = dec!(1.00) - spread;
+
+        // Log near-profitable opportunities for debugging
+        if spread < dec!(1.05) {
+            tracing::debug!(
+                "Market {}: YES={}, NO={}, spread={}, profit_pct={}, min={}",
+                &market.name[..market.name.len().min(40)],
+                yes_ask, no_ask, spread, profit_pct, self.min_profit
+            );
+        }
 
         // Check minimum profit threshold
         if profit_pct < self.min_profit {
@@ -183,14 +187,14 @@ mod tests {
     fn test_profitable_opportunity() {
         let detector = SpreadDetector::new(dec!(0.01), 60);
 
-        // YES: $0.45, NO: $0.45 => Spread: $0.90, Profit: 11.1%
+        // YES: $0.45, NO: $0.45 => Spread: $0.90, Profit: $0.10 (10%)
         let market = make_market(dec!(0.45), dec!(0.45));
         let opp = detector.check_opportunity(&market);
 
         assert!(opp.is_some());
         let opp = opp.unwrap();
         assert_eq!(opp.spread, dec!(0.90));
-        assert!(opp.profit_pct > dec!(0.10)); // ~11% profit
+        assert_eq!(opp.profit_pct, dec!(0.10)); // $0.10 profit
     }
 
     #[test]

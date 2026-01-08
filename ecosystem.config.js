@@ -91,9 +91,9 @@ module.exports = {
         DATABASE_URL: DATABASE_URL,
       },
       // Dry run mode with 1 second intervals
-      // Match Python: assets include UNKNOWN, max expiry 60 days
+      // Match Python: assets include UNKNOWN, max expiry 60 days, min profit 2%
       // 30s orderbook freshness - orderbook-stream reconnects every 20s to keep fresh
-      args: '--dry-run --interval-ms 1000 --verbose-timing --assets BTC,ETH,SOL,XRP,UNKNOWN --max-time-to-expiry 5184000 --max-orderbook-age 30',
+      args: '--dry-run --interval-ms 1000 --verbose-timing --assets BTC,ETH,SOL,XRP,UNKNOWN --max-time-to-expiry 5184000 --max-orderbook-age 30 --min-profit 0.02',
     },
 
     // Python Trade Executor Service (for comparison)
