@@ -332,15 +332,16 @@ impl GammaClient {
     }
 
     /// Fetch and filter markets for supported types.
+    /// Uses fetch_all_binary_markets to get all two-outcome markets (not just Up/Down).
     pub async fn fetch_supported_markets(&self) -> Result<Vec<ParsedMarket>, GammaError> {
-        let markets = self.fetch_markets().await?;
+        let markets = self.fetch_all_binary_markets().await?;
 
         let parsed: Vec<ParsedMarket> = markets
             .into_iter()
             .filter_map(|m| self.parse_market(m))
-            .filter(|m| m.market_type.is_supported())
             .collect();
 
+        info!("Parsed {} supported markets", parsed.len());
         Ok(parsed)
     }
 
