@@ -23,20 +23,38 @@ pub enum GammaError {
     ApiError(String),
 }
 
-/// Known crypto series IDs for Up/Down markets (15m+ only, 5m excluded)
+/// Known crypto series IDs for Up/Down markets (all timeframes)
 pub const CRYPTO_SERIES: &[(&str, &str)] = &[
     // BTC Up or Down
+    ("10193", "BTC Up or Down 5m"),
     ("10192", "BTC Up or Down 15m"),
     ("10114", "BTC Up or Down 1h"),
+    ("10194", "BTC Up or Down 4h"),
+    ("10115", "BTC Up or Down Daily"),
     // ETH Up or Down
+    ("10190", "ETH Up or Down 5m"),
     ("10191", "ETH Up or Down 15m"),
     ("10117", "ETH Up or Down 1h"),
+    ("10195", "ETH Up or Down 4h"),
+    ("10118", "ETH Up or Down Daily"),
     // SOL Up or Down
+    ("10424", "SOL Up or Down 5m"),
     ("10423", "SOL Up or Down 15m"),
     ("10122", "SOL Up or Down 1h"),
+    ("10425", "SOL Up or Down 4h"),
+    ("10121", "SOL Up or Down Daily"),
     // XRP Up or Down
+    ("10421", "XRP Up or Down 5m"),
     ("10422", "XRP Up or Down 15m"),
     ("10123", "XRP Up or Down 1h"),
+    ("10426", "XRP Up or Down 4h"),
+    ("10124", "XRP Up or Down Daily"),
+    // DOGE Up or Down
+    ("10500", "DOGE Up or Down 15m"),
+    ("10501", "DOGE Up or Down 1h"),
+    // ADA Up or Down
+    ("10502", "ADA Up or Down 15m"),
+    ("10503", "ADA Up or Down 1h"),
 ];
 
 /// Market type classification for filtering.
@@ -213,6 +231,47 @@ impl GammaClient {
         Ok(events)
     }
 
+    /// Fetch all open events (paginated, not limited to series).
+    pub async fn fetch_all_open_events(&self) -> Result<Vec<GammaEvent>, GammaError> {
+        let mut all_events = Vec::new();
+        let mut offset = 0;
+        let max_events = 5000;
+
+        while offset < max_events {
+            let url = format!("{}/events", self.base_url);
+
+            let response = self.client
+                .get(&url)
+                .query(&[
+                    ("closed", "false"),
+                    ("limit", "500"),
+                    ("offset", &offset.to_string()),
+                ])
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                break;
+            }
+
+            let events: Vec<GammaEvent> = response.json().await?;
+            if events.is_empty() {
+                break;
+            }
+
+            let count = events.len();
+            all_events.extend(events);
+            offset += 500;
+
+            if count < 500 {
+                break;
+            }
+        }
+
+        debug!("Fetched {} total open events", all_events.len());
+        Ok(all_events)
+    }
+
     /// Fetch all active crypto markets from known series.
     pub async fn fetch_markets(&self) -> Result<Vec<GammaMarket>, GammaError> {
         let mut all_markets = Vec::new();
@@ -239,6 +298,36 @@ impl GammaClient {
         }
 
         info!("Total markets fetched from all series: {}", all_markets.len());
+        Ok(all_markets)
+    }
+
+    /// Fetch all binary markets (any two-outcome market).
+    pub async fn fetch_all_binary_markets(&self) -> Result<Vec<GammaMarket>, GammaError> {
+        let events = self.fetch_all_open_events().await?;
+        let mut all_markets = Vec::new();
+
+        for event in events {
+            for market in event.markets {
+                // Only include active, non-closed markets with exactly 2 outcomes
+                if !market.active.unwrap_or(false) || market.closed.unwrap_or(true) {
+                    continue;
+                }
+
+                // Check for exactly 2 outcomes
+                if let Some(outcomes) = market.parse_outcomes() {
+                    if outcomes.len() == 2 {
+                        // Check for exactly 2 token IDs
+                        if let Some(token_ids) = market.parse_token_ids() {
+                            if token_ids.len() == 2 {
+                                all_markets.push(market);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Total binary markets fetched: {}", all_markets.len());
         Ok(all_markets)
     }
 
@@ -373,21 +462,56 @@ fn extract_asset(question: &str) -> String {
 fn extract_timeframe(question: &str) -> String {
     let question_lower = question.to_lowercase();
 
-    // Look for common timeframe patterns
-    if question_lower.contains("1 hour") || question_lower.contains("1h") {
-        return "1h".to_string();
+    // Look for common timeframe patterns (order matters - check shorter durations first)
+
+    // 5-minute markets
+    if question_lower.contains("5 min") || question_lower.contains("5min") || question_lower.contains("-5m") {
+        return "5m".to_string();
     }
+
+    // 15-minute markets
+    if question_lower.contains("15 min") || question_lower.contains("15min") || question_lower.contains("-15m") {
+        return "15m".to_string();
+    }
+
+    // Check for time range pattern (15-minute markets): contains patterns like "pm-" followed by time
+    // e.g., "1:30pm-1:45pm" or "2:00pm-2:15pm"
+    if (question_lower.contains("pm-") || question_lower.contains("am-"))
+        && question_lower.contains(":")
+    {
+        return "15m".to_string();
+    }
+
+    // 4-hour markets
     if question_lower.contains("4 hour") || question_lower.contains("4h") {
         return "4h".to_string();
     }
-    if question_lower.contains("daily") || question_lower.contains("24h") {
+
+    // 1-hour markets
+    if question_lower.contains("1 hour") || question_lower.contains("1h") {
+        return "1h".to_string();
+    }
+
+    // Hourly pattern: contains "am et" or "pm et" (single time, not range)
+    if (question_lower.contains("am et") || question_lower.contains("pm et"))
+        && !question_lower.contains(":")
+    {
+        return "1h".to_string();
+    }
+
+    // Daily markets (month names or "daily")
+    let months = ["january", "february", "march", "april", "may", "june",
+                  "july", "august", "september", "october", "november", "december"];
+    if months.iter().any(|m| question_lower.contains(m)) || question_lower.contains("daily") || question_lower.contains("24h") {
         return "daily".to_string();
     }
+
+    // Weekly
     if question_lower.contains("weekly") {
         return "weekly".to_string();
     }
 
-    // Try to extract date-based timeframe
+    // Default to unknown
     "unknown".to_string()
 }
 

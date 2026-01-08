@@ -22,8 +22,10 @@ class Asset(str, Enum):
 class Timeframe(str, Enum):
     """Market timeframes."""
 
+    FIVE_MIN = "5min"
     FIFTEEN_MIN = "15min"
     HOURLY = "hourly"
+    FOUR_HOUR = "4h"
     DAILY = "daily"
     EVENT = "event"  # For one-time events like sports games
 
@@ -35,6 +37,7 @@ class MarketType(str, Enum):
     ABOVE = "above"            # Crypto above price level
     PRICE_RANGE = "price_range"  # Crypto between price range
     SPORTS = "sports"          # Sports game outcomes
+    BINARY = "binary"          # Generic two-outcome market (non-crypto)
 
 
 class PositionStatus(str, Enum):

@@ -89,8 +89,9 @@ class Settings(BaseSettings):
     spread_bot_assets: str = "BTC,ETH,SOL,XRP"
 
     # Maximum time to expiry to consider (in seconds)
-    # Only monitor markets expiring within this window (7200 = 2 hours)
-    spread_bot_max_time_to_expiry: int = Field(default=7200, ge=300, le=86400)
+    # Only monitor markets expiring within this window
+    # 86400 = 24 hours (to support daily markets)
+    spread_bot_max_time_to_expiry: int = Field(default=86400, ge=300, le=604800)
 
     # Poll interval in seconds
     spread_bot_poll_interval: int = Field(default=1, ge=1, le=60)
