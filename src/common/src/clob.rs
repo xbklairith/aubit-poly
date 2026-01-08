@@ -56,7 +56,11 @@ pub struct BookMessage {
     pub event_type: String,
     pub asset_id: String,
     pub market: String,
+    /// Bids (buy orders). May be named "buys" in some API versions.
+    #[serde(alias = "buys")]
     pub bids: Vec<PriceLevel>,
+    /// Asks (sell orders). May be named "sells" in some API versions.
+    #[serde(alias = "sells")]
     pub asks: Vec<PriceLevel>,
     pub timestamp: String,
     pub hash: String,
@@ -64,17 +68,19 @@ pub struct BookMessage {
 
 impl BookMessage {
     /// Get best bid price (highest bid).
-    /// CLOB WebSocket returns bids sorted ascending (lowest first),
-    /// so best bid is the last element.
+    /// Uses max() for robustness - doesn't rely on API sort order.
     pub fn best_bid(&self) -> Option<Decimal> {
-        self.bids.last()?.price_decimal()
+        self.bids.iter()
+            .filter_map(|p| p.price_decimal())
+            .max()
     }
 
     /// Get best ask price (lowest ask).
-    /// CLOB WebSocket returns asks sorted descending (highest first),
-    /// so best ask is the last element.
+    /// Uses min() for robustness - doesn't rely on API sort order.
     pub fn best_ask(&self) -> Option<Decimal> {
-        self.asks.last()?.price_decimal()
+        self.asks.iter()
+            .filter_map(|p| p.price_decimal())
+            .min()
     }
 }
 
@@ -327,6 +333,19 @@ impl ClobClient {
             Some(Err(e)) => Err(ClobError::ConnectionError(e)),
             None => Err(ClobError::ChannelClosed),
         }
+    }
+
+    /// Send a ping to keep the connection alive.
+    /// Per Polymarket docs: send PING every 10 seconds to maintain connection.
+    pub async fn send_ping(
+        &self,
+        ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ) -> Result<(), ClobError> {
+        ws.send(Message::Ping(vec![].into()))
+            .await
+            .map_err(ClobError::ConnectionError)?;
+        debug!("Sent keepalive ping");
+        Ok(())
     }
 }
 

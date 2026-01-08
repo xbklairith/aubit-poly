@@ -126,11 +126,27 @@ async fn run_stream(clob: &ClobClient, db: &Database, once: bool) -> Result<()> 
     // Track orderbook state per market
     let mut orderbooks: HashMap<Uuid, MarketOrderbook> = HashMap::new();
     let mut snapshot_count = 0;
+    let mut last_ping = std::time::Instant::now();
+    let ping_interval = Duration::from_secs(10);
 
     // Process stream messages
     loop {
-        match clob.read_message(&mut ws).await {
-            Ok(Some(ClobMessage::Books(books))) => {
+        // Send keepalive ping every 10 seconds per Polymarket docs
+        if last_ping.elapsed() >= ping_interval {
+            if let Err(e) = clob.send_ping(&mut ws).await {
+                warn!("Failed to send ping: {}", e);
+            }
+            last_ping = std::time::Instant::now();
+        }
+
+        // Use timeout to not block forever waiting for messages
+        let read_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            clob.read_message(&mut ws)
+        ).await;
+
+        match read_result {
+            Ok(Ok(Some(ClobMessage::Books(books)))) => {
                 // Batch of book snapshots (initial subscription response)
                 info!("Received batch of {} book snapshots", books.len());
                 for book in books {
@@ -141,7 +157,7 @@ async fn run_stream(clob: &ClobClient, db: &Database, once: bool) -> Result<()> 
                     return Ok(());
                 }
             }
-            Ok(Some(ClobMessage::Book(book))) => {
+            Ok(Ok(Some(ClobMessage::Book(book)))) => {
                 debug!("Received book update for asset {}", book.asset_id);
                 process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, once, markets.len()).await?;
                 if once && snapshot_count >= markets.len() {
@@ -149,31 +165,35 @@ async fn run_stream(clob: &ClobClient, db: &Database, once: bool) -> Result<()> 
                     return Ok(());
                 }
             }
-            Ok(Some(ClobMessage::PriceChange(_))) => {
+            Ok(Ok(Some(ClobMessage::PriceChange(_)))) => {
                 // Price changes are delta updates, we primarily care about full book snapshots
                 debug!("Received price change (ignoring)");
             }
-            Ok(Some(ClobMessage::Trade(trade))) => {
+            Ok(Ok(Some(ClobMessage::Trade(trade)))) => {
                 debug!(
                     "Received trade: {} @ {} ({})",
                     trade.asset_id, trade.price, trade.side
                 );
             }
-            Ok(Some(ClobMessage::Ping)) => {
+            Ok(Ok(Some(ClobMessage::Ping))) => {
                 debug!("Received ping");
             }
-            Ok(Some(ClobMessage::Ack)) => {
+            Ok(Ok(Some(ClobMessage::Ack))) => {
                 debug!("Received acknowledgement");
             }
-            Ok(Some(ClobMessage::Unknown(msg))) => {
+            Ok(Ok(Some(ClobMessage::Unknown(msg)))) => {
                 debug!("Received unknown message: {}", msg);
             }
-            Ok(None) => {
+            Ok(Ok(None)) => {
                 // Non-text message, ignore
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 error!("WebSocket error: {}", e);
                 return Err(e.into());
+            }
+            Err(_) => {
+                // Timeout - no message received, continue loop to check ping
+                debug!("Read timeout, checking ping...");
             }
         }
     }
