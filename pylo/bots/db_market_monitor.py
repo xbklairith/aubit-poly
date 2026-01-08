@@ -18,6 +18,7 @@ from pylo.db.queries import (
     get_active_markets,
     get_latest_orderbook,
     get_market_by_condition_id,
+    get_markets_with_fresh_orderbooks,
     get_markets_with_latest_orderbooks,
 )
 
@@ -45,13 +46,16 @@ class DBMarketMonitor:
         self._market_id_map: dict[str, UUID] = {}  # condition_id -> db UUID
 
     async def discover_markets(self, force_refresh: bool = False) -> list[UpDownMarket]:
-        """Discover all active markets from the database.
+        """Discover markets with fresh orderbook data and prices pre-loaded.
+
+        Single optimized query returns markets + orderbook prices together.
+        Only returns markets with orderbook data < 120 seconds old.
 
         Args:
             force_refresh: If True, clears cache and fetches fresh data.
 
         Returns:
-            List of UpDownMarket objects from the database.
+            List of UpDownMarket objects with prices already applied.
         """
         if force_refresh:
             self._markets.clear()
@@ -63,9 +67,10 @@ class DBMarketMonitor:
         all_markets: list[UpDownMarket] = []
 
         async with self._db.session() as session:
-            db_markets = await get_active_markets(session)
+            # Single query returns markets WITH prices - no second query needed
+            db_results = await get_markets_with_latest_orderbooks(session)
 
-            for db_market in db_markets:
+            for db_market, orderbook in db_results:
                 # Filter by configured assets
                 if db_market.asset.upper() not in [a.upper() for a in assets]:
                     continue
@@ -80,6 +85,10 @@ class DBMarketMonitor:
                 # Skip markets too far in the future
                 if bot_market.time_to_expiry > max_expiry:
                     continue
+
+                # Apply prices from orderbook
+                if orderbook:
+                    self._apply_orderbook_snapshot(bot_market, orderbook)
 
                 # Cache the mapping from condition_id to DB UUID
                 self._market_id_map[bot_market.id] = db_market.id

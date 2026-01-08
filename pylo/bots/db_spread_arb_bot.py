@@ -135,6 +135,15 @@ class DBSpreadArbBot:
 
         # Initialize database connection
         self._db = get_database()
+
+        # Warmup database connection pool
+        if await self._db.health_check():
+            pool_count = await self._db.warmup()
+            logger.info(f"Database connected, warmed up {pool_count} connections")
+        else:
+            logger.error("Database health check failed")
+            return
+
         self.monitor = DBMarketMonitor(self._db)
 
         # Initial market discovery

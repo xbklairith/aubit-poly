@@ -27,6 +27,57 @@ async def get_active_markets(session: AsyncSession) -> list[Market]:
     return list(result.scalars().all())
 
 
+async def get_markets_with_fresh_orderbooks(
+    session: AsyncSession, max_age_seconds: int = 60
+) -> list[Market]:
+    """Get only markets that have fresh orderbook data.
+
+    This is much faster than get_active_markets() because it only returns
+    markets that are actively being streamed (have recent orderbook updates).
+
+    Args:
+        session: Database session.
+        max_age_seconds: Maximum age of orderbook data in seconds.
+
+    Returns:
+        List of markets with fresh orderbook data.
+    """
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT DISTINCT ON (m.id)
+            m.id, m.condition_id, m.market_type, m.asset, m.timeframe,
+            m.yes_token_id, m.no_token_id, m.name, m.end_time, m.is_active,
+            m.discovered_at, m.updated_at
+        FROM markets m
+        INNER JOIN orderbook_snapshots o ON o.market_id = m.id
+        WHERE m.is_active = true
+          AND o.captured_at > NOW() - INTERVAL '120 seconds'
+        ORDER BY m.id, o.captured_at DESC
+    """)
+
+    result = await session.execute(query)
+    rows = result.fetchall()
+
+    markets = []
+    for row in rows:
+        markets.append(Market(
+            id=row.id,
+            condition_id=row.condition_id,
+            market_type=row.market_type,
+            asset=row.asset,
+            timeframe=row.timeframe,
+            yes_token_id=row.yes_token_id,
+            no_token_id=row.no_token_id,
+            name=row.name,
+            end_time=row.end_time,
+            is_active=row.is_active,
+            discovered_at=row.discovered_at,
+            updated_at=row.updated_at,
+        ))
+    return markets
+
+
 async def get_market_by_condition_id(
     session: AsyncSession, condition_id: str
 ) -> Market | None:
@@ -95,7 +146,8 @@ async def get_markets_with_latest_orderbooks(
     """
     from sqlalchemy import text
 
-    # Single query to get all markets with their latest orderbook in one shot
+    # Single query to get markets with FRESH orderbooks only (< 30 seconds old)
+    # Uses index on (market_id, captured_at DESC) for fast lookups
     query = text("""
         SELECT
             m.id, m.condition_id, m.market_type, m.asset, m.timeframe,
@@ -104,10 +156,11 @@ async def get_markets_with_latest_orderbooks(
             o.id as snap_id, o.yes_best_ask, o.yes_best_bid,
             o.no_best_ask, o.no_best_bid, o.spread, o.captured_at
         FROM markets m
-        LEFT JOIN LATERAL (
+        INNER JOIN LATERAL (
             SELECT id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, spread, captured_at
             FROM orderbook_snapshots
             WHERE market_id = m.id
+              AND captured_at > NOW() - INTERVAL '30 seconds'
             ORDER BY captured_at DESC
             LIMIT 1
         ) o ON true

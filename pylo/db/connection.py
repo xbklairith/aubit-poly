@@ -77,6 +77,28 @@ class Database:
         except Exception:
             return False
 
+    async def warmup(self) -> int:
+        """Pre-create pool connections to avoid first-query latency.
+
+        Creates connections up to pool_size concurrently, then returns them
+        to the pool for reuse.
+
+        Returns:
+            Number of connections warmed up.
+        """
+        import asyncio
+        from sqlalchemy import text
+
+        async def create_connection():
+            async with self._session_factory() as session:
+                await session.execute(text("SELECT 1"))
+
+        # Create pool_size connections concurrently
+        pool_size = self._engine.pool.size()
+        tasks = [create_connection() for _ in range(pool_size)]
+        await asyncio.gather(*tasks)
+        return pool_size
+
     async def close(self) -> None:
         """Close the database connection pool."""
         await self._engine.dispose()
