@@ -4,7 +4,7 @@
  * This configuration manages three microservices:
  * 1. market-scanner (Rust) - Polls Gamma API for prediction markets
  * 2. orderbook-stream (Rust) - Streams orderbook data from CLOB WebSocket
- * 3. trade-executor (Python) - Detects spreads and executes trades
+ * 3. trade-executor (Rust) - Detects spreads and executes trades
  *
  * Usage:
  *   pm2 start ecosystem.config.js
@@ -72,12 +72,33 @@ module.exports = {
       },
       // Hybrid mode: crypto (12h) + event markets (60 days)
       // Supports both short-term crypto and long-dated events (Super Bowl, elections)
-      args: '--hybrid --crypto-hours 12 --event-days 60 --crypto-limit 1500 --event-limit 1500',
+      // Reconnect every 20s to refresh all orderbooks for 30s freshness filter
+      args: '--hybrid --crypto-hours 12 --event-days 60 --crypto-limit 1500 --event-limit 1500 --reconnect-interval 20',
     },
 
-    // Python Trade Executor Service (DB-backed)
+    // Rust Trade Executor Service
     {
       name: 'trade-executor',
+      script: './target/release/trade-executor',
+      interpreter: 'none',
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 5000,
+      env: {
+        RUST_LOG: 'info',
+        DATABASE_URL: DATABASE_URL,
+      },
+      // Dry run mode with 1 second intervals
+      // Match Python: assets include UNKNOWN, max expiry 60 days
+      // 30s orderbook freshness - orderbook-stream reconnects every 20s to keep fresh
+      args: '--dry-run --interval-ms 1000 --verbose-timing --assets BTC,ETH,SOL,XRP,UNKNOWN --max-time-to-expiry 5184000 --max-orderbook-age 30',
+    },
+
+    // Python Trade Executor Service (for comparison)
+    {
+      name: 'trade-executor-py',
       script: 'uv',
       args: 'run python -m pylo.bots.db_spread_arb_bot',
       interpreter: 'none',
@@ -88,7 +109,7 @@ module.exports = {
       restart_delay: 5000,
       env: {
         LOG_LEVEL: 'INFO',
-        DRY_RUN: 'true',  // Safety: default to dry run mode
+        DRY_RUN: 'true',
         DATABASE_URL: DATABASE_URL,
       },
     },

@@ -149,9 +149,19 @@ class DBSpreadArbBot:
         # Initial market discovery
         await self._discover_markets()
 
+        # Track last refresh time for periodic market discovery
+        last_refresh = datetime.now(timezone.utc)
+        refresh_interval = 60  # Refresh market list every 60 seconds
+
         # Main loop
         while self._running and not self._shutdown_event.is_set():
             try:
+                # Periodic market refresh to catch new markets
+                now = datetime.now(timezone.utc)
+                if (now - last_refresh).total_seconds() >= refresh_interval:
+                    await self._discover_markets(force_refresh=True)
+                    last_refresh = now
+
                 await self._run_cycle()
                 await asyncio.sleep(self.settings.spread_bot_poll_interval)
             except asyncio.CancelledError:

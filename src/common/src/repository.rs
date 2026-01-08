@@ -1,11 +1,33 @@
 //! Database repository functions for markets and orderbooks.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::gamma::{MarketType, ParsedMarket};
 use crate::models::Market;
+
+/// Market with fresh orderbook prices (result of LATERAL JOIN query).
+#[derive(Debug, Clone)]
+pub struct MarketWithPrices {
+    pub id: Uuid,
+    pub condition_id: String,
+    pub market_type: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub name: String,
+    pub end_time: DateTime<Utc>,
+    pub is_active: bool,
+    // Orderbook prices
+    pub yes_best_ask: Option<Decimal>,
+    pub yes_best_bid: Option<Decimal>,
+    pub no_best_ask: Option<Decimal>,
+    pub no_best_bid: Option<Decimal>,
+    pub captured_at: DateTime<Utc>,
+}
 
 /// Upsert a market into the database.
 /// Updates existing market if condition_id matches, otherwise inserts new.
@@ -234,7 +256,8 @@ pub async fn count_markets_by_type(pool: &PgPool) -> Result<Vec<(String, i64)>, 
         .collect())
 }
 
-/// Insert an orderbook snapshot into the database.
+/// Upsert an orderbook snapshot into the database.
+/// Uses ON CONFLICT to update existing snapshot for the market, keeping the DB clean.
 pub async fn insert_orderbook_snapshot(
     pool: &PgPool,
     market_id: Uuid,
@@ -249,8 +272,18 @@ pub async fn insert_orderbook_snapshot(
 ) -> Result<i64, sqlx::Error> {
     let result = sqlx::query_scalar!(
         r#"
-        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, yes_asks, yes_bids, no_asks, no_bids)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, yes_asks, yes_bids, no_asks, no_bids, captured_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (market_id) DO UPDATE SET
+            yes_best_ask = EXCLUDED.yes_best_ask,
+            yes_best_bid = EXCLUDED.yes_best_bid,
+            no_best_ask = EXCLUDED.no_best_ask,
+            no_best_bid = EXCLUDED.no_best_bid,
+            yes_asks = EXCLUDED.yes_asks,
+            yes_bids = EXCLUDED.yes_bids,
+            no_asks = EXCLUDED.no_asks,
+            no_bids = EXCLUDED.no_bids,
+            captured_at = NOW()
         RETURNING id
         "#,
         market_id,
@@ -333,6 +366,166 @@ pub async fn get_market_by_condition_id(
     .await?;
 
     Ok(market)
+}
+
+/// Get markets with fresh orderbook prices using optimized LATERAL JOIN.
+/// Only returns markets with orderbook data captured within max_age_seconds.
+pub async fn get_markets_with_fresh_orderbooks(
+    pool: &PgPool,
+    max_age_seconds: i32,
+    assets: &[String],
+    max_expiry_seconds: i64,
+) -> Result<Vec<MarketWithPrices>, sqlx::Error> {
+    // Build the query - SQLx doesn't support dynamic IN clauses well,
+    // so we use ANY with an array
+    let results = sqlx::query_as!(
+        MarketWithPrices,
+        r#"
+        SELECT
+            m.id,
+            m.condition_id,
+            m.market_type,
+            m.asset,
+            m.timeframe,
+            m.yes_token_id,
+            m.no_token_id,
+            m.name,
+            m.end_time,
+            COALESCE(m.is_active, true) as "is_active!",
+            o.yes_best_ask,
+            o.yes_best_bid,
+            o.no_best_ask,
+            o.no_best_bid,
+            o.captured_at as "captured_at!"
+        FROM markets m
+        INNER JOIN LATERAL (
+            SELECT yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
+            FROM orderbook_snapshots
+            WHERE market_id = m.id
+              AND captured_at > NOW() - make_interval(secs => $1::double precision)
+            ORDER BY captured_at DESC
+            LIMIT 1
+        ) o ON true
+        WHERE m.is_active = true
+          AND m.asset = ANY($2)
+          AND m.end_time > NOW()
+          AND m.end_time <= NOW() + make_interval(secs => $3::double precision)
+        ORDER BY m.end_time ASC
+        "#,
+        max_age_seconds as f64,
+        assets,
+        max_expiry_seconds as f64,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results)
+}
+
+/// Create a new trading position.
+pub async fn create_position(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_shares: Decimal,
+    no_shares: Decimal,
+    total_invested: Decimal,
+    is_dry_run: bool,
+) -> Result<Uuid, sqlx::Error> {
+    let id = sqlx::query_scalar!(
+        r#"
+        INSERT INTO positions (market_id, yes_shares, no_shares, total_invested, is_dry_run, status)
+        VALUES ($1, $2, $3, $4, $5, 'open')
+        RETURNING id
+        "#,
+        market_id,
+        yes_shares,
+        no_shares,
+        total_invested,
+        is_dry_run
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Record a trade execution.
+pub async fn record_trade(
+    pool: &PgPool,
+    position_id: Uuid,
+    side: &str,
+    action: &str,
+    price: Decimal,
+    shares: Decimal,
+) -> Result<Uuid, sqlx::Error> {
+    let id = sqlx::query_scalar!(
+        r#"
+        INSERT INTO trades (position_id, side, action, price, shares)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        "#,
+        position_id,
+        side,
+        action,
+        price,
+        shares
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Get all open positions.
+pub async fn get_open_positions(pool: &PgPool) -> Result<Vec<crate::models::Position>, sqlx::Error> {
+    let positions = sqlx::query_as!(
+        crate::models::Position,
+        r#"
+        SELECT
+            id,
+            market_id,
+            yes_shares,
+            no_shares,
+            total_invested,
+            COALESCE(status, 'open') as "status!",
+            COALESCE(is_dry_run, true) as "is_dry_run!",
+            COALESCE(opened_at, NOW()) as "opened_at!",
+            closed_at
+        FROM positions
+        WHERE status = 'open'
+        ORDER BY opened_at DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(positions)
+}
+
+/// Close a position.
+pub async fn close_position(
+    pool: &PgPool,
+    position_id: Uuid,
+    payout: Decimal,
+    realized_pnl: Decimal,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE positions
+        SET status = 'closed',
+            closed_at = NOW()
+        WHERE id = $1
+        "#,
+        position_id
+    )
+    .execute(pool)
+    .await?;
+
+    // Note: payout and realized_pnl would be stored if we add those columns
+    // For now, just close the position
+    let _ = (payout, realized_pnl); // Silence unused warnings
+
+    Ok(())
 }
 
 #[cfg(test)]

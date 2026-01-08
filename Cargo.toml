@@ -4,6 +4,7 @@ members = [
     "src/common",
     "src/market-scanner",
     "src/orderbook-stream",
+    "src/trade-executor",
 ]
 
 [workspace.package]

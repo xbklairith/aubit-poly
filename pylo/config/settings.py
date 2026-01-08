@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     # Poll interval in seconds
     spread_bot_poll_interval: int = Field(default=1, ge=1, le=60)
 
+    # Maximum orderbook age for market discovery (seconds)
+    # Only markets with orderbooks fresher than this will be included
+    # 30s - orderbook-stream reconnects every 20s to keep fresh
+    max_orderbook_age_seconds: int = Field(default=30, ge=5, le=86400)
+
     # JSON log file path
     spread_bot_log_file: str = "logs/spread_bot_trades.json"
 

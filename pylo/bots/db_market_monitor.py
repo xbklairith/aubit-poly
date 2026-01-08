@@ -68,7 +68,10 @@ class DBMarketMonitor:
 
         async with self._db.session() as session:
             # Single query returns markets WITH prices - no second query needed
-            db_results = await get_markets_with_latest_orderbooks(session)
+            max_orderbook_age = getattr(self._settings, 'max_orderbook_age_seconds', 30)
+            db_results = await get_markets_with_latest_orderbooks(
+                session, max_orderbook_age_seconds=max_orderbook_age
+            )
 
             for db_market, orderbook in db_results:
                 # Filter by configured assets

@@ -60,6 +60,11 @@ struct Args {
     /// Max event markets in hybrid mode (default: 1500)
     #[arg(long, default_value = "1500")]
     event_limit: i64,
+
+    /// Reconnect interval in seconds to refresh all orderbooks (default: 20)
+    /// This triggers a full reconnect to get fresh snapshots for all markets
+    #[arg(long, default_value = "20")]
+    reconnect_interval: u64,
 }
 
 #[tokio::main]
@@ -195,13 +200,37 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     info!("Processed buffered messages, snapshot_count={}", snapshot_count);
     let mut last_ping = std::time::Instant::now();
     let ping_interval = Duration::from_secs(10);
+    let mut consecutive_timeouts = 0;
+    let max_consecutive_timeouts = 6; // 30 seconds without data = dead connection
+
+    // Track connection start time for periodic reconnect
+    let connection_start = std::time::Instant::now();
+    let reconnect_interval = Duration::from_secs(args.reconnect_interval);
+
+    // Track message stats for periodic logging
+    let mut message_count = 0u64;
+    let mut last_stats_log = std::time::Instant::now();
+    let stats_interval = Duration::from_secs(5);
 
     // Process stream messages
     loop {
+        // Log stats every 5 seconds to confirm data is streaming
+        if last_stats_log.elapsed() >= stats_interval {
+            info!("Stream stats: {} messages received, {} snapshots saved, uptime {}s",
+                  message_count, snapshot_count, connection_start.elapsed().as_secs());
+            last_stats_log = std::time::Instant::now();
+        }
+        // Check if it's time to reconnect for fresh orderbook snapshots
+        if connection_start.elapsed() >= reconnect_interval {
+            info!("Reconnect interval reached ({}s). Reconnecting to refresh all orderbooks...",
+                  args.reconnect_interval);
+            return Ok(());
+        }
         // Send keepalive ping every 10 seconds per Polymarket docs
         if last_ping.elapsed() >= ping_interval {
             if let Err(e) = clob.send_ping(&mut ws).await {
-                warn!("Failed to send ping: {}", e);
+                error!("Failed to send ping: {}. Connection likely dead.", e);
+                return Err(e.into());
             }
             last_ping = std::time::Instant::now();
         }
@@ -214,6 +243,8 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
 
         match read_result {
             Ok(Ok(Some(ClobMessage::Books(books)))) => {
+                consecutive_timeouts = 0; // Reset on successful message
+                message_count += books.len() as u64;
                 // Batch of book snapshots (initial subscription response)
                 info!("Received batch of {} book snapshots", books.len());
                 for book in books {
@@ -225,6 +256,8 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                 }
             }
             Ok(Ok(Some(ClobMessage::Book(book)))) => {
+                consecutive_timeouts = 0; // Reset on successful message
+                message_count += 1;
                 debug!("Received book update for asset {}", book.asset_id);
                 process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
                 if args.once && snapshot_count >= markets.len() {
@@ -259,8 +292,14 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                 return Err(e.into());
             }
             Err(_) => {
-                // Timeout - no message received, continue loop to check ping
-                debug!("Read timeout, checking ping...");
+                // Timeout - no message received
+                consecutive_timeouts += 1;
+                if consecutive_timeouts >= max_consecutive_timeouts {
+                    error!("No data received for {} consecutive timeouts ({} seconds). Connection dead.",
+                           consecutive_timeouts, consecutive_timeouts * 5);
+                    return Err(anyhow::anyhow!("WebSocket connection stale - no data received"));
+                }
+                debug!("Read timeout ({}/{}), checking ping...", consecutive_timeouts, max_consecutive_timeouts);
             }
         }
     }
@@ -293,8 +332,9 @@ async fn process_book(
             orderbook.no_best_bid = book.best_bid();
         }
 
-        // Save snapshot if we have data for both YES and NO
-        if orderbook.has_both_sides() {
+        // Save snapshot whenever we have any data (refresh captured_at on every update)
+        // This keeps orderbooks fresh even when only one side gets updates
+        if orderbook.has_any_data() {
             save_snapshot(db, market_id, orderbook).await?;
             *snapshot_count += 1;
         }
@@ -357,5 +397,15 @@ impl MarketOrderbook {
     fn has_both_sides(&self) -> bool {
         (self.yes_best_ask.is_some() || !self.yes_asks.is_empty())
             && (self.no_best_ask.is_some() || !self.no_asks.is_empty())
+    }
+
+    /// Check if we have any data at all.
+    fn has_any_data(&self) -> bool {
+        self.yes_best_ask.is_some()
+            || self.yes_best_bid.is_some()
+            || self.no_best_ask.is_some()
+            || self.no_best_bid.is_some()
+            || !self.yes_asks.is_empty()
+            || !self.no_asks.is_empty()
     }
 }

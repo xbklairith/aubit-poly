@@ -133,6 +133,7 @@ async def get_latest_orderbook(
 
 async def get_markets_with_latest_orderbooks(
     session: AsyncSession,
+    max_orderbook_age_seconds: int = 30,
 ) -> list[tuple[Market, OrderbookSnapshot | None]]:
     """Get all active markets with their latest orderbook snapshot.
 
@@ -140,13 +141,14 @@ async def get_markets_with_latest_orderbooks(
 
     Args:
         session: Database session.
+        max_orderbook_age_seconds: Maximum age of orderbook data in seconds (default: 30).
 
     Returns:
         List of (Market, OrderbookSnapshot | None) tuples.
     """
     from sqlalchemy import text
 
-    # Single query to get markets with FRESH orderbooks only (< 30 seconds old)
+    # Single query to get markets with FRESH orderbooks only
     # Uses index on (market_id, captured_at DESC) for fast lookups
     query = text("""
         SELECT
@@ -160,7 +162,7 @@ async def get_markets_with_latest_orderbooks(
             SELECT id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, spread, captured_at
             FROM orderbook_snapshots
             WHERE market_id = m.id
-              AND captured_at > NOW() - INTERVAL '30 seconds'
+              AND captured_at > NOW() - make_interval(secs => :max_age)
             ORDER BY captured_at DESC
             LIMIT 1
         ) o ON true
@@ -168,7 +170,7 @@ async def get_markets_with_latest_orderbooks(
         ORDER BY m.end_time ASC
     """)
 
-    result = await session.execute(query)
+    result = await session.execute(query, {"max_age": float(max_orderbook_age_seconds)})
     rows = result.fetchall()
 
     results: list[tuple[Market, OrderbookSnapshot | None]] = []
