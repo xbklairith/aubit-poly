@@ -367,9 +367,9 @@ impl TradeExecutor {
                 _ => "OTHER",
             };
 
-            // Truncate name
-            let name = if market.name.len() > 40 {
-                format!("{}..", &market.name[..38])
+            // Truncate name (use chars() for UTF-8 safety)
+            let name = if market.name.chars().count() > 40 {
+                format!("{}..", market.name.chars().take(38).collect::<String>())
             } else {
                 market.name.clone()
             };
