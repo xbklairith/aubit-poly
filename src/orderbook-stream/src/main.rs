@@ -14,8 +14,8 @@ use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 use common::{
-    get_active_markets, insert_orderbook_snapshot, ClobClient, ClobMessage, Config, Database,
-    PriceLevel,
+    get_active_markets_expiring_within, insert_orderbook_snapshot, ClobClient, ClobMessage,
+    Config, Database, PriceLevel,
 };
 
 /// Orderbook Stream - real-time orderbook data via WebSocket
@@ -30,6 +30,16 @@ struct Args {
     /// Refresh market list interval in seconds
     #[arg(long, default_value = "300")]
     refresh_interval: u64,
+
+    /// Max hours until expiry for markets to stream (default: 6 hours)
+    /// Limits markets to near-term ones relevant for trading
+    #[arg(long, default_value = "6")]
+    max_expiry_hours: i32,
+
+    /// Maximum number of markets to subscribe to (default: 1000)
+    /// Prevents WebSocket overload with too many subscriptions
+    #[arg(long, default_value = "1000")]
+    max_markets: i64,
 }
 
 #[tokio::main]
@@ -65,7 +75,7 @@ async fn main() -> Result<()> {
 
     // Main loop
     loop {
-        match run_stream(&clob, &db, args.once).await {
+        match run_stream(&clob, &db, &args).await {
             Ok(_) => {
                 if args.once {
                     info!("Single snapshot mode - exiting");
@@ -83,14 +93,19 @@ async fn main() -> Result<()> {
 }
 
 /// Run the orderbook streaming loop.
-async fn run_stream(clob: &ClobClient, db: &Database, once: bool) -> Result<()> {
-    // Get active markets from database
-    info!("Fetching active markets from database...");
-    let markets = get_active_markets(db.pool()).await?;
+async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()> {
+    // Get active markets from database (filtered by expiry time and limited)
+    info!(
+        "Fetching active markets (expiring within {} hours, max {})...",
+        args.max_expiry_hours, args.max_markets
+    );
+    let markets =
+        get_active_markets_expiring_within(db.pool(), args.max_expiry_hours, args.max_markets)
+            .await?;
 
     if markets.is_empty() {
         warn!("No active markets found in database. Run market-scanner first.");
-        if once {
+        if args.once {
             return Ok(());
         }
         sleep(Duration::from_secs(60)).await;
@@ -150,17 +165,17 @@ async fn run_stream(clob: &ClobClient, db: &Database, once: bool) -> Result<()> 
                 // Batch of book snapshots (initial subscription response)
                 info!("Received batch of {} book snapshots", books.len());
                 for book in books {
-                    process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, once, markets.len()).await?;
+                    process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
                 }
-                if once && snapshot_count >= markets.len() {
+                if args.once && snapshot_count >= markets.len() {
                     info!("Captured snapshots for all {} markets", markets.len());
                     return Ok(());
                 }
             }
             Ok(Ok(Some(ClobMessage::Book(book)))) => {
                 debug!("Received book update for asset {}", book.asset_id);
-                process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, once, markets.len()).await?;
-                if once && snapshot_count >= markets.len() {
+                process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                if args.once && snapshot_count >= markets.len() {
                     info!("Captured snapshots for all {} markets", markets.len());
                     return Ok(());
                 }

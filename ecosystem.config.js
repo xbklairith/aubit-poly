@@ -70,6 +70,9 @@ module.exports = {
         RUST_LOG: 'info',
         DATABASE_URL: DATABASE_URL,
       },
+      // Stream markets expiring within 12 hours (includes ABOVE/PRICE_RANGE)
+      // Max 2000 markets to avoid WebSocket overload
+      args: '--max-expiry-hours 12 --max-markets 2000',
     },
 
     // Python Trade Executor Service (DB-backed)

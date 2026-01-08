@@ -179,6 +179,19 @@ class DBSpreadArbBot:
         markets = await self.monitor.discover_markets(force_refresh=force_refresh)
         self._markets = {m.id: m for m in markets}
 
+        # Debug: Print market type distribution and sample prices
+        type_counts: dict[str, int] = {}
+        for m in markets:
+            t = m.market_type.value
+            type_counts[t] = type_counts.get(t, 0) + 1
+        logger.info(f"Market types: {type_counts}")
+
+        # Show a sample above market with prices
+        for m in markets:
+            if m.market_type.value == "above":
+                logger.info(f"Sample ABOVE: {m.name[:50]} YES={m.yes_ask} NO={m.no_ask}")
+                break
+
         # Print discovered markets
         now = datetime.now(timezone.utc)
         print(f"\n[{now.strftime('%H:%M:%S')}] Monitoring {len(markets)} markets (from DB):")

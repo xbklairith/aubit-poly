@@ -93,6 +93,46 @@ pub async fn get_active_markets(pool: &PgPool) -> Result<Vec<Market>, sqlx::Erro
     Ok(markets)
 }
 
+/// Get active markets expiring within a given number of hours.
+/// This is optimized for orderbook streaming where we want to focus on
+/// near-term markets that are relevant for trading.
+pub async fn get_active_markets_expiring_within(
+    pool: &PgPool,
+    hours: i32,
+    limit: i64,
+) -> Result<Vec<Market>, sqlx::Error> {
+    let markets = sqlx::query_as!(
+        Market,
+        r#"
+        SELECT
+            id,
+            condition_id,
+            market_type,
+            asset,
+            timeframe,
+            yes_token_id,
+            no_token_id,
+            name,
+            end_time,
+            COALESCE(is_active, true) as "is_active!",
+            COALESCE(discovered_at, NOW()) as "discovered_at!",
+            COALESCE(updated_at, NOW()) as "updated_at!"
+        FROM markets
+        WHERE is_active = true
+          AND end_time > NOW()
+          AND end_time <= NOW() + ($1 || ' hours')::interval
+        ORDER BY end_time ASC
+        LIMIT $2
+        "#,
+        hours.to_string(),
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(markets)
+}
+
 /// Count active markets by type.
 pub async fn count_markets_by_type(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
     let counts = sqlx::query!(
