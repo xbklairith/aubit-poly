@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
 /// Run the main trading loop.
 async fn run_loop(executor: &mut TradeExecutor, args: &Args) -> Result<()> {
     loop {
-        let metrics = executor.run_cycle().await?;
+        let metrics = executor.run_cycle(args.verbose_timing).await?;
 
         if args.verbose_timing {
             info!(
@@ -193,7 +193,7 @@ async fn run_benchmark(executor: &mut TradeExecutor, cycles: usize) -> Result<()
     let mut all_metrics: Vec<CycleMetrics> = Vec::with_capacity(cycles);
 
     for i in 0..cycles {
-        let metrics = executor.run_cycle().await?;
+        let metrics = executor.run_cycle(false).await?; // No verbose in benchmark
         all_metrics.push(metrics);
 
         if (i + 1) % 10 == 0 {

@@ -59,7 +59,7 @@ impl TradeExecutor {
     }
 
     /// Run a single trading cycle.
-    pub async fn run_cycle(&mut self) -> Result<CycleMetrics> {
+    pub async fn run_cycle(&mut self, verbose: bool) -> Result<CycleMetrics> {
         let cycle_start = std::time::Instant::now();
         let mut metrics = CycleMetrics::new();
 
@@ -90,6 +90,11 @@ impl TradeExecutor {
         metrics.opportunities_found = opportunities.len();
 
         self.session.total_opportunities += opportunities.len() as i32;
+
+        // Print market analysis if verbose
+        if verbose {
+            self.print_market_analysis(&markets);
+        }
 
         // Step 3: Execute on best opportunity
         if let Some(best) = opportunities.first() {
@@ -301,5 +306,104 @@ impl TradeExecutor {
     /// Get current bot state.
     pub fn state(&self) -> BotState {
         self.state
+    }
+
+    /// Print market analysis table (like Python's _print_status).
+    fn print_market_analysis(&self, markets: &[MarketWithPrices]) {
+        let min_profit = self.config.min_profit;
+
+        println!("\n📊 Market Analysis (from DB):");
+        println!(
+            "  {:<8} {:<40} {:>6} {:>6} {:>7} {:>7} {}",
+            "Type", "Market", "YES", "NO", "Spread", "Profit", "Decision"
+        );
+        println!(
+            "  {:-<8} {:-<40} {:-<6} {:-<6} {:-<7} {:-<7} {:-<10}",
+            "", "", "", "", "", "", ""
+        );
+
+        let mut near_profitable_count = 0;
+
+        // Sort by end_time
+        let mut sorted_markets: Vec<_> = markets.iter().collect();
+        sorted_markets.sort_by_key(|m| m.end_time);
+
+        for market in sorted_markets {
+            let yes_ask = match market.yes_best_ask {
+                Some(p) => p,
+                None => continue,
+            };
+            let no_ask = match market.no_best_ask {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let spread = yes_ask + no_ask;
+            let profit_pct = dec!(1.00) - spread;
+
+            // Only show markets with spread < 1.1 (near profitable)
+            if spread >= dec!(1.10) {
+                continue;
+            }
+            near_profitable_count += 1;
+
+            // Determine decision
+            let decision = if yes_ask <= dec!(0) || no_ask <= dec!(0) {
+                "❌ No price".to_string()
+            } else if profit_pct >= min_profit {
+                "✅ TRADE!".to_string()
+            } else if profit_pct > dec!(0) {
+                format!("⏳ +{:.1}% < {:.0}%", profit_pct * dec!(100), min_profit * dec!(100))
+            } else {
+                format!("❌ {:.1}%", profit_pct * dec!(100))
+            };
+
+            // Type abbreviation
+            let type_abbrev = match market.market_type.as_str() {
+                "up_down" => "UP/DOWN",
+                "above" => "ABOVE",
+                "price_range" => "RANGE",
+                "sports" => "SPORTS",
+                _ => "OTHER",
+            };
+
+            // Truncate name
+            let name = if market.name.len() > 40 {
+                format!("{}..", &market.name[..38])
+            } else {
+                market.name.clone()
+            };
+
+            println!(
+                "  {:<8} {:<40} ${:.2} ${:.2} ${:.3} {:>+.1}% {}",
+                type_abbrev,
+                name,
+                yes_ask,
+                no_ask,
+                spread,
+                profit_pct * dec!(100),
+                decision
+            );
+        }
+
+        if near_profitable_count == 0 {
+            println!("  (no markets with spread < 1.1)");
+        }
+
+        // Print status summary
+        let return_pct = if self.session.starting_balance > dec!(0) {
+            (self.session.net_profit / self.session.starting_balance) * dec!(100)
+        } else {
+            dec!(0)
+        };
+
+        println!(
+            "\nBalance: ${:.2} | Positions: {} | Trades: {} | P/L: ${:+.2} ({:+.2}%)",
+            self.session.current_balance,
+            self.session.open_positions.len(),
+            self.session.total_trades,
+            self.session.net_profit,
+            return_pct
+        );
     }
 }
