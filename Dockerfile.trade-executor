@@ -1,20 +1,29 @@
-# Build stage
-FROM rust:latest AS builder
-
+# Chef stage - prepare recipe
+FROM rust:latest AS chef
+RUN cargo install cargo-chef
 WORKDIR /app
 
-# Install build dependencies
+# Planner stage - create recipe.json
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Builder stage - build dependencies (cached) then app
+FROM chef AS builder
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy workspace files
+# Build dependencies (this layer is cached)
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build application
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY .sqlx ./.sqlx
-
-# Build all release binaries (offline mode)
 ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
