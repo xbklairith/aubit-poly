@@ -9,7 +9,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
     command: >
       --dry-run
       --verbose-timing
@@ -30,7 +30,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
     restart: unless-stopped
     networks:
       - aubit-net
@@ -44,7 +44,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
     restart: unless-stopped
     networks:
       - aubit-net
