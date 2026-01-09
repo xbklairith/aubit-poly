@@ -508,8 +508,8 @@ impl TradeExecutor {
             let spread = yes_ask + no_ask;
             let profit_pct = dec!(1.00) - spread;
 
-            // Only show markets with spread < 1.1 (near profitable)
-            if spread >= dec!(1.10) {
+            // Only show markets with actual profit opportunity (spread < $1.00)
+            if spread >= dec!(1.00) {
                 continue;
             }
             near_profitable_count += 1;
@@ -554,7 +554,7 @@ impl TradeExecutor {
         }
 
         if near_profitable_count == 0 {
-            println!("  (no markets with spread < 1.1)");
+            println!("  (no profitable markets found)");
         }
 
         // Print status summary
