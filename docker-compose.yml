@@ -1,33 +1,13 @@
 version: '3.8'
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: aubit-poly-db
-    environment:
-      POSTGRES_USER: aubit
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aubit_dev_password}
-      POSTGRES_DB: aubit_poly
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aubit -d aubit_poly"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - aubit-net
-
   trade-executor:
     build:
       context: .
       dockerfile: Dockerfile.trade-executor
     container_name: trade-executor
     environment:
-      DATABASE_URL: postgres://aubit:${POSTGRES_PASSWORD:-aubit_dev_password}@postgres:5432/aubit_poly
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@host.docker.internal:5432/aubit_poly}
     command: >
       --dry-run
       --verbose-timing
@@ -35,12 +15,9 @@ services:
       --max-time-to-expiry 5184000
       --max-orderbook-age 30
       --min-profit 0.02
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: unless-stopped
-    networks:
-      - aubit-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   orderbook-stream:
     build:
@@ -49,13 +26,10 @@ services:
     container_name: orderbook-stream
     entrypoint: ["orderbook-stream"]
     environment:
-      DATABASE_URL: postgres://aubit:${POSTGRES_PASSWORD:-aubit_dev_password}@postgres:5432/aubit_poly
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@host.docker.internal:5432/aubit_poly}
     restart: unless-stopped
-    networks:
-      - aubit-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   market-scanner:
     build:
@@ -64,17 +38,7 @@ services:
     container_name: market-scanner
     entrypoint: ["market-scanner"]
     environment:
-      DATABASE_URL: postgres://aubit:${POSTGRES_PASSWORD:-aubit_dev_password}@postgres:5432/aubit_poly
-    depends_on:
-      postgres:
-        condition: service_healthy
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@host.docker.internal:5432/aubit_poly}
     restart: unless-stopped
-    networks:
-      - aubit-net
-
-volumes:
-  postgres_data:
-
-networks:
-  aubit-net:
-    driver: bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
