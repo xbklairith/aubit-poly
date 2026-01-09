@@ -1,0 +1,45 @@
+[package]
+name = "poly-check"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "poly-check"
+path = "src/main.rs"
+
+[[bin]]
+name = "place-order"
+path = "src/bin/place_order.rs"
+
+[dependencies]
+# Polymarket SDK
+polymarket-client-sdk = "0.1"
+
+# Alloy (for signing)
+alloy = { version = "1.3", features = ["signers", "signer-local"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HTTP client (for positions API)
+reqwest = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Config
+dotenvy = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Serialization
+serde_json = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }

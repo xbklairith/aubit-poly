@@ -76,6 +76,8 @@ impl SpreadDetector {
             market_name: market.name.clone(),
             asset: market.asset.clone(),
             end_time: market.end_time,
+            yes_token_id: market.yes_token_id.clone(),
+            no_token_id: market.no_token_id.clone(),
             yes_price: yes_ask,
             no_price: no_ask,
             spread,

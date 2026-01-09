@@ -49,6 +49,19 @@ services:
     networks:
       - aubit-net
 
+  poly-check:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: poly-check
+    entrypoint: ["poly-check"]
+    env_file:
+      - .env
+    profiles:
+      - tools
+    networks:
+      - aubit-net
+
 networks:
   aubit-net:
     external: true

@@ -14,6 +14,8 @@ pub struct SpreadOpportunity {
     pub market_name: String,
     pub asset: String,
     pub end_time: DateTime<Utc>,
+    pub yes_token_id: String,
+    pub no_token_id: String,
     pub yes_price: Decimal,
     pub no_price: Decimal,
     pub spread: Decimal,

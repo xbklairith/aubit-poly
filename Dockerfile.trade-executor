@@ -38,5 +38,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/trade-executor /usr/local/bin/
 COPY --from=builder /app/target/release/market-scanner /usr/local/bin/
 COPY --from=builder /app/target/release/orderbook-stream /usr/local/bin/
+COPY --from=builder /app/target/release/poly-check /usr/local/bin/
+COPY --from=builder /app/target/release/place-order /usr/local/bin/
 
 ENTRYPOINT ["trade-executor"]

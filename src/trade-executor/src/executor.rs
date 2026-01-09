@@ -1,13 +1,19 @@
 //! Trade executor state machine.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::Result;
+use alloy::signers::local::LocalSigner;
+use alloy::signers::Signer;
+use anyhow::{Context, Result};
 use chrono::Utc;
+use polymarket_client_sdk::clob::types::SignatureType;
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use common::repository::{self, MarketWithPrices};
@@ -153,11 +159,172 @@ impl TradeExecutor {
         if self.config.dry_run {
             self.execute_dry_run(opportunity, &details).await?;
         } else {
-            // Live trading would go here
-            unimplemented!("Live trading not yet implemented");
+            self.execute_live_trade(opportunity, &details).await?;
         }
 
         Ok(true)
+    }
+
+    /// Execute a live trade on Polymarket.
+    async fn execute_live_trade(
+        &mut self,
+        opportunity: &SpreadOpportunity,
+        details: &TradeDetails,
+    ) -> Result<()> {
+        info!(
+            "[LIVE] Placing orders for {} | YES: {:.4} @ ${:.4} | NO: {:.4} @ ${:.4}",
+            opportunity.market_name,
+            details.yes_shares, details.yes_price,
+            details.no_shares, details.no_price
+        );
+
+        // Get credentials from environment
+        let private_key = std::env::var("WALLET_PRIVATE_KEY")
+            .context("Missing WALLET_PRIVATE_KEY for live trading")?;
+
+        let private_key = if private_key.starts_with("0x") {
+            private_key
+        } else {
+            format!("0x{}", private_key)
+        };
+
+        // Create signer
+        let signer = LocalSigner::from_str(&private_key)
+            .context("Invalid private key format")?
+            .with_chain_id(Some(POLYGON));
+
+        // Check for proxy wallet
+        let proxy_wallet = std::env::var("POLYMARKET_WALLET_ADDRESS").ok();
+        let signature_type = if proxy_wallet.is_some() {
+            SignatureType::GnosisSafe
+        } else {
+            SignatureType::Eoa
+        };
+
+        // Authenticate with CLOB
+        let mut auth_builder = ClobClient::new("https://clob.polymarket.com", ClobConfig::default())?
+            .authentication_builder(&signer)
+            .signature_type(signature_type);
+
+        if let Some(ref proxy) = proxy_wallet {
+            let funder_address: alloy::primitives::Address = proxy
+                .parse()
+                .context("Invalid proxy wallet address")?;
+            auth_builder = auth_builder.funder(funder_address);
+        }
+
+        let clob_client = auth_builder
+            .authenticate()
+            .await
+            .context("Failed to authenticate with Polymarket")?;
+
+        // Place YES order
+        let yes_order = clob_client
+            .limit_order()
+            .token_id(&opportunity.yes_token_id)
+            .size(details.yes_shares)
+            .price(details.yes_price)
+            .side(polymarket_client_sdk::clob::types::Side::Buy)
+            .build()
+            .await
+            .context("Failed to build YES order")?;
+
+        let yes_signed = clob_client
+            .sign(&signer, yes_order)
+            .await
+            .context("Failed to sign YES order")?;
+
+        let yes_result = clob_client
+            .post_order(yes_signed)
+            .await
+            .context("Failed to post YES order")?;
+
+        info!("[LIVE] YES order result: {:?}", yes_result);
+
+        // Place NO order
+        let no_order = clob_client
+            .limit_order()
+            .token_id(&opportunity.no_token_id)
+            .size(details.no_shares)
+            .price(details.no_price)
+            .side(polymarket_client_sdk::clob::types::Side::Buy)
+            .build()
+            .await
+            .context("Failed to build NO order")?;
+
+        let no_signed = clob_client
+            .sign(&signer, no_order)
+            .await
+            .context("Failed to sign NO order")?;
+
+        let no_result = clob_client
+            .post_order(no_signed)
+            .await
+            .context("Failed to post NO order")?;
+
+        info!("[LIVE] NO order result: {:?}", no_result);
+
+        // Create position in database (not dry_run)
+        let position_id = repository::create_position(
+            self.db.pool(),
+            opportunity.market_id,
+            details.yes_shares,
+            details.no_shares,
+            details.total_invested,
+            false, // NOT dry_run
+        )
+        .await?;
+
+        // Record trades
+        repository::record_trade(
+            self.db.pool(),
+            position_id,
+            "yes",
+            "buy",
+            details.yes_price,
+            details.yes_shares,
+        )
+        .await?;
+
+        repository::record_trade(
+            self.db.pool(),
+            position_id,
+            "no",
+            "buy",
+            details.no_price,
+            details.no_shares,
+        )
+        .await?;
+
+        // Update session state
+        self.session.current_balance -= details.total_invested;
+        self.session.total_trades += 2;
+        self.session.positions_opened += 1;
+        self.session.fees_paid += details.fee;
+
+        // Cache position
+        self.session.open_positions.insert(
+            opportunity.market_id,
+            PositionCache {
+                id: position_id,
+                market_id: opportunity.market_id,
+                market_name: opportunity.market_name.clone(),
+                yes_shares: details.yes_shares,
+                no_shares: details.no_shares,
+                total_invested: details.total_invested,
+                end_time: opportunity.end_time,
+            },
+        );
+
+        info!(
+            "[LIVE] TRADE EXECUTED: {} | YES: {:.4} @ ${:.4} | NO: {:.4} @ ${:.4} | Invested: ${:.2}",
+            opportunity.market_name,
+            details.yes_shares, details.yes_price,
+            details.no_shares, details.no_price,
+            details.total_invested
+        );
+
+        Ok(())
     }
 
     /// Execute a dry-run (simulated) trade.
