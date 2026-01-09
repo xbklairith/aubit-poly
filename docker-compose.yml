@@ -11,6 +11,7 @@ services:
     environment:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
     command: >
+      --dry-run=false
       --verbose-timing
       --assets BTC,ETH,SOL,XRP,UNKNOWN
       --max-time-to-expiry 5184000
