@@ -33,8 +33,8 @@ struct Args {
     #[arg(long)]
     once: bool,
 
-    /// Poll interval in milliseconds
-    #[arg(long, default_value = "1000")]
+    /// Poll interval in milliseconds (0 = no delay)
+    #[arg(long, default_value = "0")]
     interval_ms: u64,
 
     /// Dry run mode (simulated trading)
@@ -180,7 +180,9 @@ async fn run_loop(executor: &mut TradeExecutor, args: &Args) -> Result<()> {
             break;
         }
 
-        sleep(Duration::from_millis(args.interval_ms)).await;
+        if args.interval_ms > 0 {
+            sleep(Duration::from_millis(args.interval_ms)).await;
+        }
     }
 
     Ok(())
