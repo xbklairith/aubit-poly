@@ -5,9 +5,9 @@ services:
     image: postgres:16-alpine
     container_name: aubit-poly-db
     environment:
-      POSTGRES_USER: aubit
-      POSTGRES_PASSWORD: aubit_dev_password
-      POSTGRES_DB: aubit_poly
+      POSTGRES_USER: ${POSTGRES_USER:-aubit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aubit_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aubit_poly}
     ports:
       - "5432:5432"
     volumes:

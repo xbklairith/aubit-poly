@@ -6,8 +6,10 @@ services:
       context: .
       dockerfile: Dockerfile.trade-executor
     container_name: trade-executor
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
     command: >
       --dry-run
       --verbose-timing
@@ -25,8 +27,10 @@ services:
       dockerfile: Dockerfile.trade-executor
     container_name: orderbook-stream
     entrypoint: ["orderbook-stream"]
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
     restart: unless-stopped
     networks:
       - aubit-net
@@ -37,8 +41,10 @@ services:
       dockerfile: Dockerfile.trade-executor
     container_name: market-scanner
     entrypoint: ["market-scanner"]
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      DATABASE_URL: ${DATABASE_URL:-postgres://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly}
     restart: unless-stopped
     networks:
       - aubit-net
