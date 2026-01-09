@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE positions\n        SET status = 'closed',\n            closed_at = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57e444938f51c4e37bbbf598a7e109032ced7e230e7a068dddbe10bb6909faef"
+}

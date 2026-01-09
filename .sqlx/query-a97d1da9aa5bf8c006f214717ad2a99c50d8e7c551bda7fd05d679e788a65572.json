@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO markets (condition_id, market_type, asset, timeframe, yes_token_id, no_token_id, name, end_time, is_active)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)\n        ON CONFLICT (condition_id) DO UPDATE SET\n            market_type = EXCLUDED.market_type,\n            asset = EXCLUDED.asset,\n            timeframe = EXCLUDED.timeframe,\n            yes_token_id = EXCLUDED.yes_token_id,\n            no_token_id = EXCLUDED.no_token_id,\n            name = EXCLUDED.name,\n            end_time = EXCLUDED.end_time,\n            is_active = true,\n            updated_at = NOW()\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a97d1da9aa5bf8c006f214717ad2a99c50d8e7c551bda7fd05d679e788a65572"
+}

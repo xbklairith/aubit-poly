@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y \
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY .sqlx ./.sqlx
 
-# Build all release binaries
+# Build all release binaries (offline mode)
+ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
 # Runtime stage

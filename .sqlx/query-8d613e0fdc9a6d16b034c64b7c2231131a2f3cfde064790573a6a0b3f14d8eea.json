@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            market_id,\n            yes_shares,\n            no_shares,\n            total_invested,\n            COALESCE(status, 'open') as \"status!\",\n            COALESCE(is_dry_run, true) as \"is_dry_run!\",\n            COALESCE(opened_at, NOW()) as \"opened_at!\",\n            closed_at\n        FROM positions\n        WHERE status = 'open'\n        ORDER BY opened_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "market_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "yes_shares",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 3,
+        "name": "no_shares",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_invested",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 5,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_dry_run!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "opened_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "closed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "8d613e0fdc9a6d16b034c64b7c2231131a2f3cfde064790573a6a0b3f14d8eea"
+}

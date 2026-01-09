@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, yes_asks, yes_bids, no_asks, no_bids, captured_at)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())\n        ON CONFLICT (market_id) DO UPDATE SET\n            yes_best_ask = EXCLUDED.yes_best_ask,\n            yes_best_bid = EXCLUDED.yes_best_bid,\n            no_best_ask = EXCLUDED.no_best_ask,\n            no_best_bid = EXCLUDED.no_best_bid,\n            yes_asks = EXCLUDED.yes_asks,\n            yes_bids = EXCLUDED.yes_bids,\n            no_asks = EXCLUDED.no_asks,\n            no_bids = EXCLUDED.no_bids,\n            captured_at = NOW()\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Numeric",
+        "Numeric",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1ce75d17f8aa3d5525b9e30c440002d69569b29fde9d9abf7e4625a9f80ddcbe"
+}

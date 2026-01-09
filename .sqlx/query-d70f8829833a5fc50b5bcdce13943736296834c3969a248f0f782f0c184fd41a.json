@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO positions (market_id, yes_shares, no_shares, total_invested, is_dry_run, status)\n        VALUES ($1, $2, $3, $4, $5, 'open')\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Numeric",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d70f8829833a5fc50b5bcdce13943736296834c3969a248f0f782f0c184fd41a"
+}

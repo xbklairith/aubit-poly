@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            condition_id,\n            market_type,\n            asset,\n            timeframe,\n            yes_token_id,\n            no_token_id,\n            name,\n            end_time,\n            COALESCE(is_active, true) as \"is_active!\",\n            COALESCE(discovered_at, NOW()) as \"discovered_at!\",\n            COALESCE(updated_at, NOW()) as \"updated_at!\"\n        FROM markets\n        WHERE is_active = true\n        ORDER BY end_time ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "condition_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "market_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "asset",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "timeframe",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "yes_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "no_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "end_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "discovered_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "0980f5eec4b1f19c306d96e60a824ff4637496c103c777f36b4a73e600d8ddee"
+}

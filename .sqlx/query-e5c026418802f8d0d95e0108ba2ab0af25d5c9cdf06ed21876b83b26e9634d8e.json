@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT market_type, COUNT(*) as count\n        FROM markets\n        WHERE is_active = true\n        GROUP BY market_type\n        ORDER BY count DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "market_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "e5c026418802f8d0d95e0108ba2ab0af25d5c9cdf06ed21876b83b26e9634d8e"
+}

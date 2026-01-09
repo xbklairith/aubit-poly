@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE markets\n        SET is_active = false, updated_at = NOW()\n        WHERE is_active = true AND end_time < $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59b568bbd73afb253fa7ea4b9ecb78a0355722c95b64125c0d7b8fea276f18f2"
+}
