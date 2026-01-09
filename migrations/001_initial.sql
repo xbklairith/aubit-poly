@@ -63,6 +63,10 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_market_time
     ON orderbook_snapshots(market_id, captured_at DESC);
 
+-- Unique constraint for ON CONFLICT upsert (one snapshot per market)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_market_unique
+    ON orderbook_snapshots(market_id);
+
 -- Index for finding profitable spreads
 CREATE INDEX IF NOT EXISTS idx_snapshots_spread
     ON orderbook_snapshots(spread) WHERE spread < 1.0;
