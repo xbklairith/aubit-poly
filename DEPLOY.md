@@ -8,28 +8,28 @@ cp .env.example .env
 
 ## 2. Start Database
 ```bash
-docker-compose -f docker-compose-db.yml up -d
+docker compose -f docker-compose-db.yml up -d
 ```
 
 ## 3. Build & Start Services
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ## 4. Check Status
 ```bash
-docker-compose ps
-docker-compose logs -f trade-executor
+docker compose ps
+docker compose logs -f trade-executor
 ```
 
 ## 5. Stop Services
 ```bash
-docker-compose down
+docker compose down
 ```
 
 ## 6. Stop Database
 ```bash
-docker-compose -f docker-compose-db.yml down
+docker compose -f docker-compose-db.yml down
 ```
 
 ## Live Trading
