@@ -37,8 +37,8 @@ struct Args {
     #[arg(long, default_value = "0")]
     interval_ms: u64,
 
-    /// Dry run mode (simulated trading)
-    #[arg(long, default_value = "true")]
+    /// Dry run mode (simulated trading). Use --dry-run=false for live trading.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     dry_run: bool,
 
     /// Starting balance for dry run
