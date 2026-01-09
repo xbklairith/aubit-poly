@@ -18,6 +18,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - aubit-net
 
 volumes:
   postgres_data:
+
+networks:
+  aubit-net:
+    name: aubit-net
