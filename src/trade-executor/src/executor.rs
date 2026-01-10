@@ -21,7 +21,7 @@ use common::Database;
 
 use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
-use crate::metrics::CycleMetrics;
+use crate::metrics::{CycleMetrics, MarketSummary};
 use crate::models::{BotState, PositionCache, SessionState, SpreadOpportunity, TradeDetails};
 
 /// Trade executor - manages trading state and executes spread arbitrage.
@@ -96,6 +96,9 @@ impl TradeExecutor {
         metrics.opportunities_found = opportunities.len();
 
         self.session.total_opportunities += opportunities.len() as i32;
+
+        // Collect top 10 markets by profit (including negative)
+        metrics.top_markets = self.get_top_markets(&markets, 10);
 
         // Print market analysis if verbose
         if verbose {
@@ -473,6 +476,39 @@ impl TradeExecutor {
     /// Get current bot state.
     pub fn state(&self) -> BotState {
         self.state
+    }
+
+    /// Get top N markets sorted by profit (highest first, including negative).
+    fn get_top_markets(&self, markets: &[MarketWithPrices], limit: usize) -> Vec<MarketSummary> {
+        let mut summaries: Vec<MarketSummary> = markets
+            .iter()
+            .filter_map(|m| {
+                let yes_price = m.yes_best_ask?;
+                let no_price = m.no_best_ask?;
+                if yes_price <= dec!(0) || no_price <= dec!(0) {
+                    return None;
+                }
+                let spread = yes_price + no_price;
+                let profit_pct = dec!(1.00) - spread;
+                Some(MarketSummary {
+                    name: if m.name.chars().count() > 50 {
+                        format!("{}..", m.name.chars().take(48).collect::<String>())
+                    } else {
+                        m.name.clone()
+                    },
+                    asset: m.asset.clone(),
+                    yes_price,
+                    no_price,
+                    spread,
+                    profit_pct,
+                })
+            })
+            .collect();
+
+        // Sort by profit (highest/best first)
+        summaries.sort_by(|a, b| b.profit_pct.partial_cmp(&a.profit_pct).unwrap_or(std::cmp::Ordering::Equal));
+        summaries.truncate(limit);
+        summaries
     }
 
     /// Print market analysis table (like Python's _print_status).

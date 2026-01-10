@@ -1,5 +1,18 @@
 //! Performance metrics collection.
 
+use rust_decimal::Decimal;
+
+/// Summary of a market's spread opportunity (for reporting).
+#[derive(Debug, Clone)]
+pub struct MarketSummary {
+    pub name: String,
+    pub asset: String,
+    pub yes_price: Decimal,
+    pub no_price: Decimal,
+    pub spread: Decimal,
+    pub profit_pct: Decimal,
+}
+
 /// Per-cycle performance metrics.
 #[derive(Debug, Default, Clone)]
 pub struct CycleMetrics {
@@ -12,6 +25,7 @@ pub struct CycleMetrics {
     pub opportunities_found: usize,
     pub trades_executed: usize,
     pub positions_settled: usize,
+    pub top_markets: Vec<MarketSummary>,
 }
 
 impl CycleMetrics {

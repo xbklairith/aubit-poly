@@ -1,7 +1,7 @@
 //! Rust Trade Executor - Spread arbitrage trading bot.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,7 +22,7 @@ mod models;
 
 use config::ExecutorConfig;
 use executor::TradeExecutor;
-use metrics::{AggregateMetrics, CycleMetrics};
+use metrics::{AggregateMetrics, CycleMetrics, MarketSummary};
 
 /// Rust Trade Executor - spread arbitrage trading bot
 #[derive(Parser, Debug)]
@@ -157,23 +157,42 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Report interval for quiet periods (15 minutes).
+const REPORT_INTERVAL_SECS: u64 = 15 * 60;
+
 /// Run the main trading loop.
 async fn run_loop(executor: &mut TradeExecutor, args: &Args) -> Result<()> {
+    let mut last_report = Instant::now();
+    let mut cycle_count: u64 = 0;
+
     loop {
         let metrics = executor.run_cycle(args.verbose_timing).await?;
+        cycle_count += 1;
 
-        if args.verbose_timing {
-            info!(
-                "Cycle: {}ms (query: {}ms, detect: {}ms, exec: {}ms, settle: {}ms) | Markets: {} | Opps: {} | Trades: {}",
-                metrics.total_cycle_ms,
-                metrics.market_query_ms,
-                metrics.detection_ms,
-                metrics.execution_ms,
-                metrics.settlement_ms,
-                metrics.markets_scanned,
-                metrics.opportunities_found,
-                metrics.trades_executed
-            );
+        let since_last_report = last_report.elapsed().as_secs();
+        let should_report = metrics.opportunities_found > 0
+            || metrics.trades_executed > 0
+            || since_last_report >= REPORT_INTERVAL_SECS;
+
+        if args.verbose_timing && should_report {
+            if metrics.opportunities_found > 0 || metrics.trades_executed > 0 {
+                // Normal report when we have opportunities
+                info!(
+                    "Cycle: {}ms (query: {}ms, detect: {}ms, exec: {}ms, settle: {}ms) | Markets: {} | Opps: {} | Trades: {}",
+                    metrics.total_cycle_ms,
+                    metrics.market_query_ms,
+                    metrics.detection_ms,
+                    metrics.execution_ms,
+                    metrics.settlement_ms,
+                    metrics.markets_scanned,
+                    metrics.opportunities_found,
+                    metrics.trades_executed
+                );
+            } else {
+                // Periodic report with top 10 markets
+                print_periodic_report(&metrics, cycle_count, since_last_report);
+            }
+            last_report = Instant::now();
         }
 
         if args.once {
@@ -186,6 +205,40 @@ async fn run_loop(executor: &mut TradeExecutor, args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print periodic report with top 10 markets.
+fn print_periodic_report(metrics: &CycleMetrics, cycles: u64, elapsed_secs: u64) {
+    let mins = elapsed_secs / 60;
+    info!(
+        "📊 Periodic Report | {} cycles | {}m elapsed | Markets: {} | No opportunities",
+        cycles, mins, metrics.markets_scanned
+    );
+
+    if !metrics.top_markets.is_empty() {
+        println!("\n  Top 10 Markets by Profit:");
+        println!(
+            "  {:<6} {:<50} {:>6} {:>6} {:>7} {:>8}",
+            "Asset", "Market", "YES", "NO", "Spread", "Profit"
+        );
+        println!(
+            "  {:-<6} {:-<50} {:-<6} {:-<6} {:-<7} {:-<8}",
+            "", "", "", "", "", ""
+        );
+
+        for m in &metrics.top_markets {
+            println!(
+                "  {:<6} {:<50} ${:.2} ${:.2} ${:.3} {:>+.2}%",
+                m.asset,
+                m.name,
+                m.yes_price,
+                m.no_price,
+                m.spread,
+                m.profit_pct * dec!(100)
+            );
+        }
+        println!();
+    }
 }
 
 /// Run benchmark mode - execute N cycles and report statistics.
