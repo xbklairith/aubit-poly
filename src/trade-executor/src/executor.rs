@@ -318,117 +318,57 @@ impl TradeExecutor {
             .context("Failed to authenticate with Polymarket")?;
 
         // Round price and size to 2 decimal places (Polymarket requirement)
-        let yes_size = details.yes_shares.round_dp(2);
+        let mut yes_size = details.yes_shares.round_dp(2);
         let yes_price = details.yes_price.round_dp(2);
-        let no_size = details.no_shares.round_dp(2);
+        let mut no_size = details.no_shares.round_dp(2);
         let no_price = details.no_price.round_dp(2);
 
         // Check minimum order value ($1 minimum per Polymarket)
         let yes_value = yes_size * yes_price;
         let no_value = no_size * no_price;
-        if yes_value < dec!(1) || no_value < dec!(1) {
+        let yes_valid = yes_value >= dec!(1);
+        let no_valid = no_value >= dec!(1);
+
+        // Determine trade mode: both sides, single side, or skip
+        let single_side_only: Option<&str> = if yes_valid && no_valid {
+            None // Both sides valid, do normal spread arb
+        } else if yes_valid && !no_valid {
+            // Only YES valid - use half size for single-sided bet
+            let half_investment = details.total_invested / dec!(2);
+            yes_size = (half_investment / yes_price).round_dp(2);
+            no_size = Decimal::ZERO;
+            info!(
+                "[LIVE] NO value too low (${:.2}), single-sided YES bet with half size: {} @ ${}",
+                no_value, yes_size, yes_price
+            );
+            Some("yes")
+        } else if !yes_valid && no_valid {
+            // Only NO valid - use half size for single-sided bet
+            let half_investment = details.total_invested / dec!(2);
+            no_size = (half_investment / no_price).round_dp(2);
+            yes_size = Decimal::ZERO;
+            info!(
+                "[LIVE] YES value too low (${:.2}), single-sided NO bet with half size: {} @ ${}",
+                yes_value, no_size, no_price
+            );
+            Some("no")
+        } else {
             warn!(
-                "[LIVE] Order value too low - YES: ${:.2}, NO: ${:.2} (min $1). Skipping.",
+                "[LIVE] Both order values too low - YES: ${:.2}, NO: ${:.2} (min $1). Skipping.",
                 yes_value, no_value
             );
             return Ok(());
+        };
+
+        // Log order details
+        if single_side_only.is_none() {
+            info!(
+                "[LIVE] Building orders: YES {} @ ${}, NO {} @ ${}",
+                yes_size, yes_price, no_size, no_price
+            );
         }
 
-        // Build both orders simultaneously with timeout
-        info!(
-            "[LIVE] Building orders: YES {} @ ${}, NO {} @ ${}",
-            yes_size, yes_price, no_size, no_price
-        );
-
-        let (yes_order, no_order) = timeout(
-            Duration::from_secs(ORDER_TIMEOUT_SECS),
-            async {
-                tokio::try_join!(
-                    async {
-                        clob_client
-                            .limit_order()
-                            .token_id(&opportunity.yes_token_id)
-                            .size(yes_size)
-                            .price(yes_price)
-                            .side(polymarket_client_sdk::clob::types::Side::Buy)
-                            .build()
-                            .await
-                            .with_context(|| format!(
-                                "Failed to build YES order: token={}, size={}, price={}",
-                                opportunity.yes_token_id, yes_size, yes_price
-                            ))
-                    },
-                    async {
-                        clob_client
-                            .limit_order()
-                            .token_id(&opportunity.no_token_id)
-                            .size(no_size)
-                            .price(no_price)
-                            .side(polymarket_client_sdk::clob::types::Side::Buy)
-                            .build()
-                            .await
-                            .with_context(|| format!(
-                                "Failed to build NO order: token={}, size={}, price={}",
-                                opportunity.no_token_id, no_size, no_price
-                            ))
-                    }
-                )
-            }
-        )
-        .await
-        .context("Order building timed out")??;
-
-        // Sign both orders simultaneously with timeout
-        let (yes_signed, no_signed) = timeout(
-            Duration::from_secs(ORDER_TIMEOUT_SECS),
-            async {
-                tokio::try_join!(
-                    async {
-                        clob_client
-                            .sign(&signer, yes_order)
-                            .await
-                            .context("Failed to sign YES order")
-                    },
-                    async {
-                        clob_client
-                            .sign(&signer, no_order)
-                            .await
-                            .context("Failed to sign NO order")
-                    }
-                )
-            }
-        )
-        .await
-        .context("Order signing timed out")??;
-
-        // Post both orders simultaneously with timeout
-        info!("[LIVE] Posting YES and NO orders simultaneously...");
-        let (yes_result, no_result) = timeout(
-            Duration::from_secs(ORDER_TIMEOUT_SECS),
-            async {
-                tokio::try_join!(
-                    async {
-                        clob_client
-                            .post_order(yes_signed)
-                            .await
-                            .context("Failed to post YES order")
-                    },
-                    async {
-                        clob_client
-                            .post_order(no_signed)
-                            .await
-                            .context("Failed to post NO order")
-                    }
-                )
-            }
-        )
-        .await
-        .context("Order posting timed out")??;
-
-        info!("[LIVE] YES order result: {:?}", yes_result);
-        info!("[LIVE] NO order result: {:?}", no_result);
-
-        // Helper to extract order result (fire-and-forget: we record what we sent)
+        // Helper to extract order result
         let extract_order_info = |result: &[polymarket_client_sdk::clob::types::PostOrderResponse]| {
             result.first().map(|r| {
                 let has_error = r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
@@ -437,85 +377,225 @@ impl TradeExecutor {
                 } else {
                     Some(r.order_id.clone())
                 };
-                // taking_amount is already Decimal
                 let filled = r.taking_amount;
                 let error = r.error_msg.clone();
                 (order_id, filled, error)
             })
         };
 
-        let (yes_order_id, yes_filled, yes_error) = extract_order_info(&yes_result)
-            .unwrap_or((None, dec!(0), Some("No response".to_string())));
-        let (no_order_id, no_filled, no_error) = extract_order_info(&no_result)
-            .unwrap_or((None, dec!(0), Some("No response".to_string())));
+        // Execute orders based on trade mode
+        let (yes_order_id, yes_filled, no_order_id, no_filled): (Option<String>, Decimal, Option<String>, Decimal) =
+            match single_side_only {
+                Some("yes") => {
+                    // Single-sided YES bet
+                    info!("[LIVE] Building single YES order: {} @ ${}", yes_size, yes_price);
+                    let yes_order = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client
+                            .limit_order()
+                            .token_id(&opportunity.yes_token_id)
+                            .size(yes_size)
+                            .price(yes_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build()
+                    )
+                    .await
+                    .context("YES order building timed out")?
+                    .context("Failed to build YES order")?;
 
-        // Check if either order completely failed (no order_id)
-        let yes_failed = yes_order_id.is_none();
-        let no_failed = no_order_id.is_none();
+                    let yes_signed = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.sign(&signer, yes_order)
+                    )
+                    .await
+                    .context("YES order signing timed out")?
+                    .context("Failed to sign YES order")?;
 
-        if yes_failed && no_failed {
-            error!(
-                "[LIVE] Both orders failed - YES: {:?}, NO: {:?}",
-                yes_error, no_error
-            );
-            return Ok(());
-        }
+                    info!("[LIVE] Posting single YES order...");
+                    let yes_result = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.post_order(yes_signed)
+                    )
+                    .await
+                    .context("YES order posting timed out")?
+                    .context("Failed to post YES order")?;
 
-        // If only one failed, cancel the other with retries
-        if yes_failed || no_failed {
-            warn!(
-                "[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.",
-                yes_error, no_error
-            );
+                    info!("[LIVE] YES order result: {:?}", yes_result);
+                    let (order_id, filled, error) = extract_order_info(&yes_result)
+                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
 
-            // Cancel YES order if it succeeded but NO failed
-            if let Some(ref order_id) = yes_order_id {
-                for attempt in 1..=CANCEL_MAX_RETRIES {
-                    match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
-                        Ok(Ok(_)) => {
-                            info!("[LIVE] Successfully cancelled YES order {} on attempt {}", order_id, attempt);
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            warn!("[LIVE] Failed to cancel YES order {} (attempt {}/{}): {:?}", order_id, attempt, CANCEL_MAX_RETRIES, e);
-                        }
-                        Err(_) => {
-                            warn!("[LIVE] Timeout cancelling YES order {} (attempt {}/{})", order_id, attempt, CANCEL_MAX_RETRIES);
-                        }
+                    if order_id.is_none() {
+                        error!("[LIVE] Single YES order failed: {:?}", error);
+                        return Ok(());
                     }
-                    if attempt == CANCEL_MAX_RETRIES {
-                        error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
-                    }
+                    (order_id, filled, None, dec!(0))
                 }
-            }
+                Some("no") => {
+                    // Single-sided NO bet
+                    info!("[LIVE] Building single NO order: {} @ ${}", no_size, no_price);
+                    let no_order = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client
+                            .limit_order()
+                            .token_id(&opportunity.no_token_id)
+                            .size(no_size)
+                            .price(no_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build()
+                    )
+                    .await
+                    .context("NO order building timed out")?
+                    .context("Failed to build NO order")?;
 
-            // Cancel NO order if it succeeded but YES failed
-            if let Some(ref order_id) = no_order_id {
-                for attempt in 1..=CANCEL_MAX_RETRIES {
-                    match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
-                        Ok(Ok(_)) => {
-                            info!("[LIVE] Successfully cancelled NO order {} on attempt {}", order_id, attempt);
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            warn!("[LIVE] Failed to cancel NO order {} (attempt {}/{}): {:?}", order_id, attempt, CANCEL_MAX_RETRIES, e);
-                        }
-                        Err(_) => {
-                            warn!("[LIVE] Timeout cancelling NO order {} (attempt {}/{})", order_id, attempt, CANCEL_MAX_RETRIES);
-                        }
+                    let no_signed = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.sign(&signer, no_order)
+                    )
+                    .await
+                    .context("NO order signing timed out")?
+                    .context("Failed to sign NO order")?;
+
+                    info!("[LIVE] Posting single NO order...");
+                    let no_result = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.post_order(no_signed)
+                    )
+                    .await
+                    .context("NO order posting timed out")?
+                    .context("Failed to post NO order")?;
+
+                    info!("[LIVE] NO order result: {:?}", no_result);
+                    let (order_id, filled, error) = extract_order_info(&no_result)
+                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+
+                    if order_id.is_none() {
+                        error!("[LIVE] Single NO order failed: {:?}", error);
+                        return Ok(());
                     }
-                    if attempt == CANCEL_MAX_RETRIES {
-                        error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
-                    }
+                    (None, dec!(0), order_id, filled)
                 }
-            }
+                _ => {
+                    // Both sides - original spread arb logic
+                    let (yes_order, no_order) = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        async {
+                            tokio::try_join!(
+                                async {
+                                    clob_client
+                                        .limit_order()
+                                        .token_id(&opportunity.yes_token_id)
+                                        .size(yes_size)
+                                        .price(yes_price)
+                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                        .build()
+                                        .await
+                                        .context("Failed to build YES order")
+                                },
+                                async {
+                                    clob_client
+                                        .limit_order()
+                                        .token_id(&opportunity.no_token_id)
+                                        .size(no_size)
+                                        .price(no_price)
+                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                        .build()
+                                        .await
+                                        .context("Failed to build NO order")
+                                }
+                            )
+                        }
+                    )
+                    .await
+                    .context("Order building timed out")??;
 
-            return Ok(());
-        }
+                    let (yes_signed, no_signed) = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        async {
+                            tokio::try_join!(
+                                clob_client.sign(&signer, yes_order),
+                                clob_client.sign(&signer, no_order)
+                            )
+                        }
+                    )
+                    .await
+                    .context("Order signing timed out")?
+                    .context("Failed to sign orders")?;
+
+                    info!("[LIVE] Posting YES and NO orders simultaneously...");
+                    let (yes_result, no_result) = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        async {
+                            tokio::try_join!(
+                                clob_client.post_order(yes_signed),
+                                clob_client.post_order(no_signed)
+                            )
+                        }
+                    )
+                    .await
+                    .context("Order posting timed out")?
+                    .context("Failed to post orders")?;
+
+                    info!("[LIVE] YES order result: {:?}", yes_result);
+                    info!("[LIVE] NO order result: {:?}", no_result);
+
+                    let (yes_id, yes_f, yes_err) = extract_order_info(&yes_result)
+                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+                    let (no_id, no_f, no_err) = extract_order_info(&no_result)
+                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+
+                    let yes_failed = yes_id.is_none();
+                    let no_failed = no_id.is_none();
+
+                    if yes_failed && no_failed {
+                        error!("[LIVE] Both orders failed - YES: {:?}, NO: {:?}", yes_err, no_err);
+                        return Ok(());
+                    }
+
+                    // If only one failed, cancel the other with retries
+                    if yes_failed || no_failed {
+                        warn!("[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.", yes_err, no_err);
+
+                        if let Some(ref order_id) = yes_id {
+                            for attempt in 1..=CANCEL_MAX_RETRIES {
+                                match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
+                                    Ok(Ok(_)) => {
+                                        info!("[LIVE] Cancelled YES order {} on attempt {}", order_id, attempt);
+                                        break;
+                                    }
+                                    Ok(Err(e)) => warn!("[LIVE] Cancel YES failed (attempt {}): {:?}", attempt, e),
+                                    Err(_) => warn!("[LIVE] Cancel YES timeout (attempt {})", attempt),
+                                }
+                                if attempt == CANCEL_MAX_RETRIES {
+                                    error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
+                                }
+                            }
+                        }
+
+                        if let Some(ref order_id) = no_id {
+                            for attempt in 1..=CANCEL_MAX_RETRIES {
+                                match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
+                                    Ok(Ok(_)) => {
+                                        info!("[LIVE] Cancelled NO order {} on attempt {}", order_id, attempt);
+                                        break;
+                                    }
+                                    Ok(Err(e)) => warn!("[LIVE] Cancel NO failed (attempt {}): {:?}", attempt, e),
+                                    Err(_) => warn!("[LIVE] Cancel NO timeout (attempt {})", attempt),
+                                }
+                                if attempt == CANCEL_MAX_RETRIES {
+                                    error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    (yes_id, yes_f, no_id, no_f)
+                }
+            };
 
         // Log fill amounts
         info!(
@@ -524,9 +604,25 @@ impl TradeExecutor {
             no_filled, no_size, no_order_id
         );
 
-        // Determine order status based on fill
-        let yes_status = if yes_filled >= yes_size { "filled" } else if yes_filled > dec!(0) { "partial" } else { "pending" };
-        let no_status = if no_filled >= no_size { "filled" } else if no_filled > dec!(0) { "partial" } else { "pending" };
+        // Determine order status based on fill (handle non-placed orders)
+        let yes_status = if yes_size == Decimal::ZERO {
+            "not_placed"
+        } else if yes_filled >= yes_size {
+            "filled"
+        } else if yes_filled > dec!(0) {
+            "partial"
+        } else {
+            "pending"
+        };
+        let no_status = if no_size == Decimal::ZERO {
+            "not_placed"
+        } else if no_filled >= no_size {
+            "filled"
+        } else if no_filled > dec!(0) {
+            "partial"
+        } else {
+            "pending"
+        };
 
         // Record position with requested amounts
         let position_id = repository::create_position(
@@ -548,39 +644,47 @@ impl TradeExecutor {
         )
         .await?;
 
-        // Record trades with order IDs and fill amounts
-        repository::record_trade_with_order(
-            self.db.pool(),
-            position_id,
-            "yes",
-            "buy",
-            yes_price,
-            yes_size,
-            yes_order_id.as_deref(),
-            yes_filled,
-            yes_status,
-        )
-        .await?;
+        // Record trades with order IDs and fill amounts (only for sides that were placed)
+        let mut trade_count = 0;
+        if yes_size > Decimal::ZERO {
+            repository::record_trade_with_order(
+                self.db.pool(),
+                position_id,
+                "yes",
+                "buy",
+                yes_price,
+                yes_size,
+                yes_order_id.as_deref(),
+                yes_filled,
+                yes_status,
+            )
+            .await?;
+            trade_count += 1;
+        }
 
-        repository::record_trade_with_order(
-            self.db.pool(),
-            position_id,
-            "no",
-            "buy",
-            no_price,
-            no_size,
-            no_order_id.as_deref(),
-            no_filled,
-            no_status,
-        )
-        .await?;
+        if no_size > Decimal::ZERO {
+            repository::record_trade_with_order(
+                self.db.pool(),
+                position_id,
+                "no",
+                "buy",
+                no_price,
+                no_size,
+                no_order_id.as_deref(),
+                no_filled,
+                no_status,
+            )
+            .await?;
+            trade_count += 1;
+        }
 
         // Update session state with actual order value
         let actual_invested = yes_size * yes_price + no_size * no_price;
+        let actual_fee = actual_invested * self.config.fee_rate;
         self.session.current_balance -= actual_invested;
-        self.session.total_trades += 2;
+        self.session.total_trades += trade_count;
         self.session.positions_opened += 1;
-        self.session.fees_paid += details.fee;
+        self.session.fees_paid += actual_fee;
 
         // Cache position with actual order values
         self.session.open_positions.insert(
@@ -596,8 +700,14 @@ impl TradeExecutor {
             },
         );
 
+        let trade_type = match single_side_only {
+            Some("yes") => "SINGLE-YES",
+            Some("no") => "SINGLE-NO",
+            _ => "SPREAD-ARB",
+        };
         info!(
-            "[LIVE] TRADE EXECUTED: {} | YES: {} @ ${} | NO: {} @ ${} | Invested: ${:.2}",
+            "[LIVE] {} EXECUTED: {} | YES: {} @ ${} | NO: {} @ ${} | Invested: ${:.2}",
+            trade_type,
             opportunity.market_name,
             yes_size, yes_price,
             no_size, no_price,
