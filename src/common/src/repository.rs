@@ -476,6 +476,62 @@ pub async fn record_trade(
     Ok(id)
 }
 
+/// Record a trade execution with order tracking (Polymarket order ID and fill amount).
+pub async fn record_trade_with_order(
+    pool: &PgPool,
+    position_id: Uuid,
+    side: &str,
+    action: &str,
+    price: Decimal,
+    shares: Decimal,
+    order_id: Option<&str>,
+    filled_shares: Decimal,
+    order_status: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let id = sqlx::query_scalar!(
+        r#"
+        INSERT INTO trades (position_id, side, action, price, shares, order_id, filled_shares, order_status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+        "#,
+        position_id,
+        side,
+        action,
+        price,
+        shares,
+        order_id,
+        filled_shares,
+        order_status
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Update position with actual filled amounts.
+pub async fn update_position_fills(
+    pool: &PgPool,
+    position_id: Uuid,
+    yes_filled: Decimal,
+    no_filled: Decimal,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        UPDATE positions
+        SET yes_filled = $2, no_filled = $3
+        WHERE id = $1
+        "#,
+        position_id,
+        yes_filled,
+        no_filled
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Get all open positions.
 pub async fn get_open_positions(pool: &PgPool) -> Result<Vec<crate::models::Position>, sqlx::Error> {
     let positions = sqlx::query_as!(
