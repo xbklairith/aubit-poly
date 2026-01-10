@@ -222,6 +222,17 @@ impl TradeExecutor {
         let no_size = details.no_shares.round_dp(2);
         let no_price = details.no_price.round_dp(2);
 
+        // Check minimum order value ($1 minimum per Polymarket)
+        let yes_value = yes_size * yes_price;
+        let no_value = no_size * no_price;
+        if yes_value < dec!(1) || no_value < dec!(1) {
+            warn!(
+                "[LIVE] Order value too low - YES: ${:.2}, NO: ${:.2} (min $1). Skipping.",
+                yes_value, no_value
+            );
+            return Ok(());
+        }
+
         // Place YES order
         info!(
             "[LIVE] Building YES order: token={}, size={}, price={}",
@@ -252,6 +263,25 @@ impl TradeExecutor {
 
         info!("[LIVE] YES order result: {:?}", yes_result);
 
+        // Check if YES order succeeded (must have order_id and no error)
+        let yes_order_id = yes_result.first().and_then(|r| {
+            if r.order_id.is_empty() {
+                None
+            } else if r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false) {
+                None
+            } else {
+                Some(r.order_id.clone())
+            }
+        });
+
+        if yes_order_id.is_none() {
+            let error_msg = yes_result.first()
+                .and_then(|r| r.error_msg.clone())
+                .unwrap_or_else(|| "Unknown error".to_string());
+            error!("[LIVE] YES order failed: {}. Aborting trade.", error_msg);
+            return Ok(());
+        }
+
         // Place NO order
         info!(
             "[LIVE] Building NO order: token={}, size={}, price={}",
@@ -281,6 +311,33 @@ impl TradeExecutor {
             .context("Failed to post NO order")?;
 
         info!("[LIVE] NO order result: {:?}", no_result);
+
+        // Check if NO order succeeded
+        let no_order_id = no_result.first().and_then(|r| {
+            if r.order_id.is_empty() {
+                None
+            } else if r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false) {
+                None
+            } else {
+                Some(r.order_id.clone())
+            }
+        });
+
+        if no_order_id.is_none() {
+            let error_msg = no_result.first()
+                .and_then(|r| r.error_msg.clone())
+                .unwrap_or_else(|| "Unknown error".to_string());
+            error!("[LIVE] NO order failed: {}. Attempting to cancel YES order.", error_msg);
+
+            // Try to cancel the YES order to avoid one-sided position
+            if let Some(yes_id) = yes_order_id {
+                match clob_client.cancel_order(&yes_id).await {
+                    Ok(_) => info!("[LIVE] Cancelled YES order {}", yes_id),
+                    Err(e) => error!("[LIVE] Failed to cancel YES order: {}", e),
+                }
+            }
+            return Ok(());
+        }
 
         // Create position in database (not dry_run)
         let position_id = repository::create_position(
