@@ -216,16 +216,29 @@ impl TradeExecutor {
             .await
             .context("Failed to authenticate with Polymarket")?;
 
+        // Round price and size to 2 decimal places (Polymarket requirement)
+        let yes_size = details.yes_shares.round_dp(2);
+        let yes_price = details.yes_price.round_dp(2);
+        let no_size = details.no_shares.round_dp(2);
+        let no_price = details.no_price.round_dp(2);
+
         // Place YES order
+        info!(
+            "[LIVE] Building YES order: token={}, size={}, price={}",
+            opportunity.yes_token_id, yes_size, yes_price
+        );
         let yes_order = clob_client
             .limit_order()
             .token_id(&opportunity.yes_token_id)
-            .size(details.yes_shares)
-            .price(details.yes_price)
+            .size(yes_size)
+            .price(yes_price)
             .side(polymarket_client_sdk::clob::types::Side::Buy)
             .build()
             .await
-            .context("Failed to build YES order")?;
+            .with_context(|| format!(
+                "Failed to build YES order: token={}, size={}, price={}",
+                opportunity.yes_token_id, yes_size, yes_price
+            ))?;
 
         let yes_signed = clob_client
             .sign(&signer, yes_order)
@@ -240,15 +253,22 @@ impl TradeExecutor {
         info!("[LIVE] YES order result: {:?}", yes_result);
 
         // Place NO order
+        info!(
+            "[LIVE] Building NO order: token={}, size={}, price={}",
+            opportunity.no_token_id, no_size, no_price
+        );
         let no_order = clob_client
             .limit_order()
             .token_id(&opportunity.no_token_id)
-            .size(details.no_shares)
-            .price(details.no_price)
+            .size(no_size)
+            .price(no_price)
             .side(polymarket_client_sdk::clob::types::Side::Buy)
             .build()
             .await
-            .context("Failed to build NO order")?;
+            .with_context(|| format!(
+                "Failed to build NO order: token={}, size={}, price={}",
+                opportunity.no_token_id, no_size, no_price
+            ))?;
 
         let no_signed = clob_client
             .sign(&signer, no_order)
