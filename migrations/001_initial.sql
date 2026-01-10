@@ -26,9 +26,16 @@ CREATE TABLE IF NOT EXISTS markets (
 );
 
 -- Indexes for markets
-CREATE INDEX IF NOT EXISTS idx_markets_active ON markets(is_active) WHERE is_active = true;
+-- Composite index for common query: WHERE is_active = true ORDER BY end_time
+CREATE INDEX IF NOT EXISTS idx_markets_active_endtime
+    ON markets(end_time ASC) WHERE is_active = true;
+
+-- Index for asset filtering with time range (crypto markets query)
+CREATE INDEX IF NOT EXISTS idx_markets_asset_endtime
+    ON markets(asset, end_time ASC) WHERE is_active = true;
+
+-- Simple indexes for ad-hoc queries
 CREATE INDEX IF NOT EXISTS idx_markets_end_time ON markets(end_time);
-CREATE INDEX IF NOT EXISTS idx_markets_asset ON markets(asset);
 CREATE INDEX IF NOT EXISTS idx_markets_type ON markets(market_type);
 
 -- =============================================================================
@@ -78,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_spread
 
 CREATE TABLE IF NOT EXISTS positions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    market_id UUID NOT NULL REFERENCES markets(id),
+    market_id UUID NOT NULL REFERENCES markets(id) ON DELETE RESTRICT,
 
     -- Shares held
     yes_shares DECIMAL(20,8) NOT NULL DEFAULT 0,
@@ -96,11 +103,15 @@ CREATE TABLE IF NOT EXISTS positions (
     closed_at TIMESTAMPTZ
 );
 
--- Index for finding open positions
-CREATE INDEX IF NOT EXISTS idx_positions_status
-    ON positions(status) WHERE status = 'open';
+-- Composite index for open positions sorted by time (common query pattern)
+CREATE INDEX IF NOT EXISTS idx_positions_open_time
+    ON positions(opened_at DESC) WHERE status = 'open';
 
--- Index for positions by market
+-- Composite index for finding open position by market
+CREATE INDEX IF NOT EXISTS idx_positions_market_open
+    ON positions(market_id, opened_at DESC) WHERE status = 'open';
+
+-- Index for all positions by market (includes closed)
 CREATE INDEX IF NOT EXISTS idx_positions_market
     ON positions(market_id);
 
