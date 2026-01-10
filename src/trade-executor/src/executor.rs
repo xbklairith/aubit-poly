@@ -306,7 +306,7 @@ impl TradeExecutor {
         info!("[LIVE] YES order result: {:?}", yes_result);
         info!("[LIVE] NO order result: {:?}", no_result);
 
-        // Helper to extract order result
+        // Helper to extract order result (fire-and-forget: we record what we sent)
         let extract_order_info = |result: &[polymarket_client_sdk::clob::types::PostOrderResponse]| {
             result.first().map(|r| {
                 let has_error = r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
@@ -315,7 +315,8 @@ impl TradeExecutor {
                 } else {
                     Some(r.order_id.clone())
                 };
-                let filled = Decimal::try_from(r.taking_amount).unwrap_or(dec!(0));
+                // Convert f64 taking_amount to Decimal properly
+                let filled = Decimal::from_f64_retain(r.taking_amount).unwrap_or(dec!(0));
                 let error = r.error_msg.clone();
                 (order_id, filled, error)
             })
@@ -326,57 +327,59 @@ impl TradeExecutor {
         let (no_order_id, no_filled, no_error) = extract_order_info(&no_result)
             .unwrap_or((None, dec!(0), Some("No response".to_string())));
 
-        // Check if either order failed
+        // Check if either order completely failed (no order_id)
         let yes_failed = yes_order_id.is_none();
         let no_failed = no_order_id.is_none();
 
-        if yes_failed || no_failed {
+        if yes_failed && no_failed {
             error!(
-                "[LIVE] Order(s) failed - YES: {:?}, NO: {:?}",
+                "[LIVE] Both orders failed - YES: {:?}, NO: {:?}",
                 yes_error, no_error
             );
+            return Ok(());
+        }
 
-            // Cancel any successful order to avoid one-sided position
+        // If only one failed, cancel the other (best effort)
+        if yes_failed || no_failed {
+            warn!(
+                "[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.",
+                yes_error, no_error
+            );
             if let Some(ref yes_id) = yes_order_id {
-                match clob_client.cancel_order(yes_id).await {
-                    Ok(_) => info!("[LIVE] Cancelled YES order {}", yes_id),
-                    Err(e) => error!("[LIVE] Failed to cancel YES order: {}", e),
-                }
+                let _ = clob_client.cancel_order(yes_id).await;
             }
             if let Some(ref no_id) = no_order_id {
-                match clob_client.cancel_order(no_id).await {
-                    Ok(_) => info!("[LIVE] Cancelled NO order {}", no_id),
-                    Err(e) => error!("[LIVE] Failed to cancel NO order: {}", e),
-                }
+                let _ = clob_client.cancel_order(no_id).await;
             }
             return Ok(());
         }
 
-        // Log fill amounts
+        // Log fill amounts (fire-and-forget: positions auto-settle on Polymarket)
         info!(
-            "[LIVE] Fills - YES: {} of {}, NO: {} of {}",
+            "[LIVE] Orders placed - YES: {} filled of {}, NO: {} filled of {}",
             yes_filled, yes_size, no_filled, no_size
         );
 
-        // Create position in database (not dry_run)
+        // Fire-and-forget: Record requested amounts in DB
+        // Actual fills may differ but positions auto-settle on Polymarket
         let position_id = repository::create_position(
             self.db.pool(),
             opportunity.market_id,
-            details.yes_shares,
-            details.no_shares,
-            details.total_invested,
+            yes_size,  // Requested (rounded) size
+            no_size,   // Requested (rounded) size
+            yes_size * yes_price + no_size * no_price, // Actual order value
             false, // NOT dry_run
         )
         .await?;
 
-        // Record trades
+        // Record trades with actual rounded order values
         repository::record_trade(
             self.db.pool(),
             position_id,
             "yes",
             "buy",
-            details.yes_price,
-            details.yes_shares,
+            yes_price,
+            yes_size,
         )
         .await?;
 
@@ -385,37 +388,38 @@ impl TradeExecutor {
             position_id,
             "no",
             "buy",
-            details.no_price,
-            details.no_shares,
+            no_price,
+            no_size,
         )
         .await?;
 
-        // Update session state
-        self.session.current_balance -= details.total_invested;
+        // Update session state with actual order value
+        let actual_invested = yes_size * yes_price + no_size * no_price;
+        self.session.current_balance -= actual_invested;
         self.session.total_trades += 2;
         self.session.positions_opened += 1;
         self.session.fees_paid += details.fee;
 
-        // Cache position
+        // Cache position with actual order values
         self.session.open_positions.insert(
             opportunity.market_id,
             PositionCache {
                 id: position_id,
                 market_id: opportunity.market_id,
                 market_name: opportunity.market_name.clone(),
-                yes_shares: details.yes_shares,
-                no_shares: details.no_shares,
-                total_invested: details.total_invested,
+                yes_shares: yes_size,
+                no_shares: no_size,
+                total_invested: actual_invested,
                 end_time: opportunity.end_time,
             },
         );
 
         info!(
-            "[LIVE] TRADE EXECUTED: {} | YES: {:.4} @ ${:.4} | NO: {:.4} @ ${:.4} | Invested: ${:.2}",
+            "[LIVE] TRADE EXECUTED: {} | YES: {} @ ${} | NO: {} @ ${} | Invested: ${:.2}",
             opportunity.market_name,
-            details.yes_shares, details.yes_price,
-            details.no_shares, details.no_price,
-            details.total_invested
+            yes_size, yes_price,
+            no_size, no_price,
+            actual_invested
         );
 
         Ok(())
