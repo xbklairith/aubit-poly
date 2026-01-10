@@ -27,8 +27,59 @@ const CANCEL_MAX_RETRIES: u32 = 3;
 /// Delay between cancellation retries
 const CANCEL_RETRY_DELAY_MS: u64 = 500;
 
+use common::models::OrderbookSnapshot;
 use common::repository::{self, MarketWithPrices};
 use common::Database;
+
+/// Calculate available liquidity from orderbook depth at best ask price.
+/// Returns the minimum USDC value available at best ask between YES and NO sides.
+/// (For spread arb, we need liquidity on BOTH sides - limited by the smaller one)
+fn calculate_orderbook_liquidity(snapshot: &OrderbookSnapshot) -> Decimal {
+    // Parse YES asks depth
+    let yes_liquidity = snapshot
+        .yes_asks
+        .as_ref()
+        .and_then(|asks| asks.as_array())
+        .and_then(|arr| arr.first())
+        .map(|best_ask| {
+            let size = best_ask
+                .get("size")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO);
+            let price = best_ask
+                .get("price")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO);
+            size * price
+        })
+        .unwrap_or(Decimal::ZERO);
+
+    // Parse NO asks depth
+    let no_liquidity = snapshot
+        .no_asks
+        .as_ref()
+        .and_then(|asks| asks.as_array())
+        .and_then(|arr| arr.first())
+        .map(|best_ask| {
+            let size = best_ask
+                .get("size")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO);
+            let price = best_ask
+                .get("price")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Decimal>().ok())
+                .unwrap_or(Decimal::ZERO);
+            size * price
+        })
+        .unwrap_or(Decimal::ZERO);
+
+    // Use minimum - can only trade as much as the thinner side allows
+    yes_liquidity.min(no_liquidity)
+}
 
 use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
@@ -142,11 +193,45 @@ impl TradeExecutor {
             return Ok(false);
         }
 
-        // Calculate investment size
-        let available = self.available_balance();
-        let size = available.min(self.config.max_position_size);
+        // Fetch orderbook to check liquidity
+        let liquidity = match repository::get_latest_orderbook_snapshot(
+            self.db.pool(),
+            opportunity.market_id,
+        )
+        .await
+        {
+            Ok(Some(snapshot)) => calculate_orderbook_liquidity(&snapshot),
+            Ok(None) => {
+                debug!("No orderbook snapshot for {}", opportunity.market_name);
+                Decimal::ZERO
+            }
+            Err(e) => {
+                warn!("Failed to fetch orderbook: {}", e);
+                Decimal::ZERO
+            }
+        };
 
-        if size < dec!(10) {
+        // Calculate investment size based on liquidity
+        // Baseline: base_position_size ($10)
+        // Scale up to max_position_size ($20) if liquidity >= threshold ($50)
+        let available = self.available_balance();
+        let target_size = if liquidity >= self.config.liquidity_threshold {
+            debug!(
+                "Good liquidity ${:.2} >= ${:.2}, using max size ${}",
+                liquidity, self.config.liquidity_threshold, self.config.max_position_size
+            );
+            self.config.max_position_size
+        } else {
+            debug!(
+                "Low liquidity ${:.2} < ${:.2}, using base size ${}",
+                liquidity, self.config.liquidity_threshold, self.config.base_position_size
+            );
+            self.config.base_position_size
+        };
+
+        let size = available.min(target_size);
+
+        if size < self.config.base_position_size {
             debug!("Insufficient balance for trade: ${}", available);
             return Ok(false);
         }
@@ -156,6 +241,11 @@ impl TradeExecutor {
             debug!("Would exceed max exposure");
             return Ok(false);
         }
+
+        info!(
+            "Trade size: ${} (liquidity: ${:.2})",
+            size, liquidity
+        );
 
         // Calculate trade details
         let details = self.detector.calculate_trade_details(

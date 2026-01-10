@@ -49,9 +49,17 @@ struct Args {
     #[arg(long, default_value = "0.01")]
     min_profit: f64,
 
-    /// Maximum position size
-    #[arg(long, default_value = "100")]
+    /// Base position size (minimum trade size)
+    #[arg(long, default_value = "10")]
+    base_position_size: f64,
+
+    /// Maximum position size (with good liquidity)
+    #[arg(long, default_value = "20")]
     max_position_size: f64,
+
+    /// Liquidity threshold to scale up from base to max size (in USDC)
+    #[arg(long, default_value = "50")]
+    liquidity_threshold: f64,
 
     /// Maximum total exposure
     #[arg(long, default_value = "1000")]
@@ -105,12 +113,23 @@ async fn main() -> Result<()> {
     db.health_check().await?;
     info!("Database connected");
 
+    // Validate position size arguments
+    if args.base_position_size > args.max_position_size {
+        anyhow::bail!(
+            "base_position_size ({}) cannot exceed max_position_size ({})",
+            args.base_position_size,
+            args.max_position_size
+        );
+    }
+
     // Build executor config
     let exec_config = ExecutorConfig {
         dry_run: args.dry_run,
         starting_balance: Decimal::try_from(args.starting_balance)?,
         min_profit: Decimal::try_from(args.min_profit)?,
+        base_position_size: Decimal::try_from(args.base_position_size)?,
         max_position_size: Decimal::try_from(args.max_position_size)?,
+        liquidity_threshold: Decimal::try_from(args.liquidity_threshold)?,
         max_total_exposure: Decimal::try_from(args.max_total_exposure)?,
         max_orderbook_age_secs: args.max_orderbook_age,
         max_price_age_secs: 60,

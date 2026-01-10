@@ -11,8 +11,12 @@ pub struct ExecutorConfig {
     pub starting_balance: Decimal,
     /// Minimum profit percentage to trigger a trade (e.g., 0.01 = 1%)
     pub min_profit: Decimal,
-    /// Maximum position size per trade
+    /// Base position size per trade (minimum)
+    pub base_position_size: Decimal,
+    /// Maximum position size per trade (with good liquidity)
     pub max_position_size: Decimal,
+    /// Liquidity threshold to scale up from base to max size (in USDC)
+    pub liquidity_threshold: Decimal,
     /// Maximum total exposure across all positions
     pub max_total_exposure: Decimal,
     /// Maximum orderbook age in seconds (reject stale prices)
@@ -33,7 +37,9 @@ impl Default for ExecutorConfig {
             dry_run: true,
             starting_balance: Decimal::new(10000, 0),
             min_profit: Decimal::new(1, 2), // 0.01 = 1%
-            max_position_size: Decimal::new(100, 0),
+            base_position_size: Decimal::new(10, 0), // $10 baseline
+            max_position_size: Decimal::new(20, 0),  // $20 max with liquidity
+            liquidity_threshold: Decimal::new(50, 0), // $50 depth needed for max size
             max_total_exposure: Decimal::new(1000, 0),
             max_orderbook_age_secs: 30,
             max_price_age_secs: 60,
