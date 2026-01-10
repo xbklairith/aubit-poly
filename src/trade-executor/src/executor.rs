@@ -851,9 +851,18 @@ impl TradeExecutor {
                     let token = token_id.to_string();
                     let side_name = side.to_string();
                     async move {
-                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(amount) {
+                        // Floor to 2 decimals to avoid selling more than we hold
+                        let floored_amount = amount.trunc_with_scale(2);
+                        if floored_amount <= Decimal::ZERO {
+                            info!("[REBALANCE] {} amount too small after floor: {} -> {}", side_name.to_uppercase(), amount, floored_amount);
+                            return;
+                        }
+                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(floored_amount) {
                             Ok(a) => a,
-                            Err(_) => return,
+                            Err(e) => {
+                                error!("[REBALANCE] {} Amount::shares({}) failed: {:?}", side_name.to_uppercase(), floored_amount, e);
+                                return;
+                            }
                         };
                         let result = timeout(
                             Duration::from_secs(ORDER_TIMEOUT_SECS),
@@ -872,16 +881,16 @@ impl TradeExecutor {
                         match result {
                             Ok(Ok(r)) => {
                                 let order_id = r.first().map(|o| o.order_id.clone()).unwrap_or_default();
-                                info!("[REBALANCE] {} sell result: order_id={}", side_name.to_uppercase(), order_id);
+                                info!("[REBALANCE] {} sell result: order_id={} (sold {})", side_name.to_uppercase(), order_id, floored_amount);
                                 if let Err(e) = repository::record_trade_with_order(
                                     db.pool(),
                                     pos_id,
                                     &side_name,
                                     "sell",
                                     Decimal::ZERO,
-                                    amount,
+                                    floored_amount,
                                     Some(&order_id),
-                                    amount,
+                                    floored_amount,
                                     "filled",
                                 ).await {
                                     error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
