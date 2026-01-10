@@ -22,7 +22,7 @@ mod models;
 
 use config::ExecutorConfig;
 use executor::TradeExecutor;
-use metrics::{AggregateMetrics, CycleMetrics, MarketSummary};
+use metrics::{AggregateMetrics, CycleMetrics};
 
 /// Rust Trade Executor - spread arbitrage trading bot
 #[derive(Parser, Debug)]

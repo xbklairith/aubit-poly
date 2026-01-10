@@ -252,36 +252,38 @@ impl TradeExecutor {
 
         let (yes_order, no_order) = timeout(
             Duration::from_secs(ORDER_TIMEOUT_SECS),
-            tokio::try_join!(
-                async {
-                    clob_client
-                        .limit_order()
-                        .token_id(&opportunity.yes_token_id)
-                        .size(yes_size)
-                        .price(yes_price)
-                        .side(polymarket_client_sdk::clob::types::Side::Buy)
-                        .build()
-                        .await
-                        .with_context(|| format!(
-                            "Failed to build YES order: token={}, size={}, price={}",
-                            opportunity.yes_token_id, yes_size, yes_price
-                        ))
-                },
-                async {
-                    clob_client
-                        .limit_order()
-                        .token_id(&opportunity.no_token_id)
-                        .size(no_size)
-                        .price(no_price)
-                        .side(polymarket_client_sdk::clob::types::Side::Buy)
-                        .build()
-                        .await
-                        .with_context(|| format!(
-                            "Failed to build NO order: token={}, size={}, price={}",
-                            opportunity.no_token_id, no_size, no_price
-                        ))
-                }
-            )
+            async {
+                tokio::try_join!(
+                    async {
+                        clob_client
+                            .limit_order()
+                            .token_id(&opportunity.yes_token_id)
+                            .size(yes_size)
+                            .price(yes_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build()
+                            .await
+                            .with_context(|| format!(
+                                "Failed to build YES order: token={}, size={}, price={}",
+                                opportunity.yes_token_id, yes_size, yes_price
+                            ))
+                    },
+                    async {
+                        clob_client
+                            .limit_order()
+                            .token_id(&opportunity.no_token_id)
+                            .size(no_size)
+                            .price(no_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build()
+                            .await
+                            .with_context(|| format!(
+                                "Failed to build NO order: token={}, size={}, price={}",
+                                opportunity.no_token_id, no_size, no_price
+                            ))
+                    }
+                )
+            }
         )
         .await
         .context("Order building timed out")??;
@@ -289,20 +291,22 @@ impl TradeExecutor {
         // Sign both orders simultaneously with timeout
         let (yes_signed, no_signed) = timeout(
             Duration::from_secs(ORDER_TIMEOUT_SECS),
-            tokio::try_join!(
-                async {
-                    clob_client
-                        .sign(&signer, yes_order)
-                        .await
-                        .context("Failed to sign YES order")
-                },
-                async {
-                    clob_client
-                        .sign(&signer, no_order)
-                        .await
-                        .context("Failed to sign NO order")
-                }
-            )
+            async {
+                tokio::try_join!(
+                    async {
+                        clob_client
+                            .sign(&signer, yes_order)
+                            .await
+                            .context("Failed to sign YES order")
+                    },
+                    async {
+                        clob_client
+                            .sign(&signer, no_order)
+                            .await
+                            .context("Failed to sign NO order")
+                    }
+                )
+            }
         )
         .await
         .context("Order signing timed out")??;
@@ -311,20 +315,22 @@ impl TradeExecutor {
         info!("[LIVE] Posting YES and NO orders simultaneously...");
         let (yes_result, no_result) = timeout(
             Duration::from_secs(ORDER_TIMEOUT_SECS),
-            tokio::try_join!(
-                async {
-                    clob_client
-                        .post_order(yes_signed)
-                        .await
-                        .context("Failed to post YES order")
-                },
-                async {
-                    clob_client
-                        .post_order(no_signed)
-                        .await
-                        .context("Failed to post NO order")
-                }
-            )
+            async {
+                tokio::try_join!(
+                    async {
+                        clob_client
+                            .post_order(yes_signed)
+                            .await
+                            .context("Failed to post YES order")
+                    },
+                    async {
+                        clob_client
+                            .post_order(no_signed)
+                            .await
+                            .context("Failed to post NO order")
+                    }
+                )
+            }
         )
         .await
         .context("Order posting timed out")??;
@@ -341,8 +347,8 @@ impl TradeExecutor {
                 } else {
                     Some(r.order_id.clone())
                 };
-                // Convert f64 taking_amount to Decimal properly
-                let filled = Decimal::from_f64_retain(r.taking_amount).unwrap_or(dec!(0));
+                // taking_amount is already Decimal
+                let filled = r.taking_amount;
                 let error = r.error_msg.clone();
                 (order_id, filled, error)
             })
@@ -372,51 +378,52 @@ impl TradeExecutor {
                 yes_error, no_error
             );
 
-            // Helper function to cancel with retries
-            async fn cancel_with_retry(
-                clob_client: &polymarket_client_sdk::clob::types::AuthenticatedClient,
-                order_id: &str,
-                side: &str,
-            ) -> bool {
+            // Cancel YES order if it succeeded but NO failed
+            if let Some(ref order_id) = yes_order_id {
                 for attempt in 1..=CANCEL_MAX_RETRIES {
-                    match timeout(
-                        Duration::from_secs(10),
-                        clob_client.cancel_order(order_id)
-                    ).await {
+                    match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
                         Ok(Ok(_)) => {
-                            info!("[LIVE] Successfully cancelled {} order {} on attempt {}", side, order_id, attempt);
-                            return true;
+                            info!("[LIVE] Successfully cancelled YES order {} on attempt {}", order_id, attempt);
+                            break;
                         }
                         Ok(Err(e)) => {
-                            warn!(
-                                "[LIVE] Failed to cancel {} order {} (attempt {}/{}): {:?}",
-                                side, order_id, attempt, CANCEL_MAX_RETRIES, e
-                            );
+                            warn!("[LIVE] Failed to cancel YES order {} (attempt {}/{}): {:?}", order_id, attempt, CANCEL_MAX_RETRIES, e);
                         }
                         Err(_) => {
-                            warn!(
-                                "[LIVE] Timeout cancelling {} order {} (attempt {}/{})",
-                                side, order_id, attempt, CANCEL_MAX_RETRIES
-                            );
+                            warn!("[LIVE] Timeout cancelling YES order {} (attempt {}/{})", order_id, attempt, CANCEL_MAX_RETRIES);
                         }
                     }
-                    if attempt < CANCEL_MAX_RETRIES {
+                    if attempt == CANCEL_MAX_RETRIES {
+                        error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                    } else {
                         tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
                     }
                 }
-                error!(
-                    "[LIVE] CRITICAL: Failed to cancel {} order {} after {} attempts. ORPHANED ORDER!",
-                    side, order_id, CANCEL_MAX_RETRIES
-                );
-                false
             }
 
-            if let Some(ref yes_id) = yes_order_id {
-                cancel_with_retry(&clob_client, yes_id, "YES").await;
+            // Cancel NO order if it succeeded but YES failed
+            if let Some(ref order_id) = no_order_id {
+                for attempt in 1..=CANCEL_MAX_RETRIES {
+                    match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
+                        Ok(Ok(_)) => {
+                            info!("[LIVE] Successfully cancelled NO order {} on attempt {}", order_id, attempt);
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            warn!("[LIVE] Failed to cancel NO order {} (attempt {}/{}): {:?}", order_id, attempt, CANCEL_MAX_RETRIES, e);
+                        }
+                        Err(_) => {
+                            warn!("[LIVE] Timeout cancelling NO order {} (attempt {}/{})", order_id, attempt, CANCEL_MAX_RETRIES);
+                        }
+                    }
+                    if attempt == CANCEL_MAX_RETRIES {
+                        error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
+                    }
+                }
             }
-            if let Some(ref no_id) = no_order_id {
-                cancel_with_retry(&clob_client, no_id, "NO").await;
-            }
+
             return Ok(());
         }
 
