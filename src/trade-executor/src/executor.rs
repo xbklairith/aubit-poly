@@ -21,11 +21,20 @@ use uuid::Uuid;
 /// Timeout for order operations (build, sign, post)
 const ORDER_TIMEOUT_SECS: u64 = 30;
 
+/// Timeout for cancel operations
+const CANCEL_TIMEOUT_SECS: u64 = 10;
+
+/// Polymarket CLOB API host
+const CLOB_HOST: &str = "https://clob.polymarket.com";
+
 /// Maximum retries for order cancellation
 const CANCEL_MAX_RETRIES: u32 = 3;
 
 /// Delay between cancellation retries
 const CANCEL_RETRY_DELAY_MS: u64 = 500;
+
+/// Wait time before converting unfilled limit order to market order
+const UNFILLED_WAIT_SECS: u64 = 10;
 
 use common::models::OrderbookSnapshot;
 use common::repository::{self, MarketWithPrices};
@@ -301,7 +310,7 @@ impl TradeExecutor {
         };
 
         // Authenticate with CLOB
-        let mut auth_builder = ClobClient::new("https://clob.polymarket.com", ClobConfig::default())?
+        let mut auth_builder = ClobClient::new(CLOB_HOST, ClobConfig::default())?
             .authentication_builder(&signer)
             .signature_type(signature_type);
 
@@ -557,7 +566,7 @@ impl TradeExecutor {
 
                         if let Some(ref order_id) = yes_id {
                             for attempt in 1..=CANCEL_MAX_RETRIES {
-                                match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
+                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
                                     Ok(Ok(_)) => {
                                         info!("[LIVE] Cancelled YES order {} on attempt {}", order_id, attempt);
                                         break;
@@ -575,7 +584,7 @@ impl TradeExecutor {
 
                         if let Some(ref order_id) = no_id {
                             for attempt in 1..=CANCEL_MAX_RETRIES {
-                                match timeout(Duration::from_secs(10), clob_client.cancel_order(order_id)).await {
+                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
                                     Ok(Ok(_)) => {
                                         info!("[LIVE] Cancelled NO order {} on attempt {}", order_id, attempt);
                                         break;
@@ -603,6 +612,10 @@ impl TradeExecutor {
             yes_filled, yes_size, yes_order_id,
             no_filled, no_size, no_order_id
         );
+
+        // Check for unfilled orders (for later rebalance spawn)
+        let yes_unfilled = single_side_only.is_none() && yes_size > Decimal::ZERO && yes_filled < yes_size;
+        let no_unfilled = single_side_only.is_none() && no_size > Decimal::ZERO && no_filled < no_size;
 
         // Determine order status based on fill (handle non-placed orders)
         let yes_status = if yes_size == Decimal::ZERO {
@@ -713,6 +726,187 @@ impl TradeExecutor {
             no_size, no_price,
             actual_invested
         );
+
+        // Spawn background rebalance task if there are unfilled orders
+        if yes_unfilled || no_unfilled {
+            info!("[LIVE] Unfilled orders detected, spawning background rebalance task");
+
+            // Clone values needed for background task
+            let yes_order_id_clone = yes_order_id.clone();
+            let no_order_id_clone = no_order_id.clone();
+            let yes_token_id = opportunity.yes_token_id.clone();
+            let no_token_id = opportunity.no_token_id.clone();
+            let market_name = opportunity.market_name.clone();
+            let private_key_clone = private_key.clone();
+            let proxy_wallet_clone = proxy_wallet.clone();
+            // Clone initial fill amounts for correct imbalance calculation
+            let yes_filled_initial = yes_filled;
+            let no_filled_initial = no_filled;
+            // Clone DB and position_id for trade recording
+            let db_clone = self.db.clone();
+            let position_id_clone = position_id;
+
+            tokio::spawn(async move {
+                // Wait before rebalancing
+                info!("[REBALANCE] Waiting {}s for {} orders to fill...", UNFILLED_WAIT_SECS, market_name);
+                tokio::time::sleep(Duration::from_secs(UNFILLED_WAIT_SECS)).await;
+
+                // Re-authenticate for background task
+                let signer = match LocalSigner::from_str(&private_key_clone) {
+                    Ok(s) => s.with_chain_id(Some(POLYGON)),
+                    Err(e) => {
+                        error!("[REBALANCE] Failed to create signer: {:?}", e);
+                        return;
+                    }
+                };
+
+                let signature_type = if proxy_wallet_clone.is_some() {
+                    SignatureType::GnosisSafe
+                } else {
+                    SignatureType::Eoa
+                };
+
+                let mut auth_builder = match ClobClient::new(CLOB_HOST, ClobConfig::default()) {
+                    Ok(c) => c.authentication_builder(&signer).signature_type(signature_type),
+                    Err(e) => {
+                        error!("[REBALANCE] Failed to create CLOB client: {:?}", e);
+                        return;
+                    }
+                };
+
+                if let Some(ref proxy) = proxy_wallet_clone {
+                    if let Ok(funder_address) = proxy.parse::<alloy::primitives::Address>() {
+                        auth_builder = auth_builder.funder(funder_address);
+                    }
+                }
+
+                let clob_client = match auth_builder.authenticate().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("[REBALANCE] Failed to authenticate: {:?}", e);
+                        return;
+                    }
+                };
+
+                // Start with initial fill values - only query API for sides that were unfilled
+                let mut final_yes_filled = yes_filled_initial;
+                let mut final_no_filled = no_filled_initial;
+
+                // Cancel and get final fill for YES order (only if it was unfilled)
+                if yes_unfilled {
+                    if let Some(ref order_id) = yes_order_id_clone {
+                        info!("[REBALANCE] Cancelling YES order {}", order_id);
+                        match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
+                            Ok(Ok(_)) => {
+                                // Cancel succeeded, query final fill amount
+                                if let Ok(Ok(order_info)) = timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
+                                    info!("[REBALANCE] YES order final: {:?}", order_info);
+                                    final_yes_filled = order_info.size_matched;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                error!("[REBALANCE] Failed to cancel YES order: {:?}. Aborting rebalance.", e);
+                                return;
+                            }
+                            Err(_) => {
+                                error!("[REBALANCE] Cancel YES order timed out. Aborting rebalance.");
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // Cancel and get final fill for NO order (only if it was unfilled)
+                if no_unfilled {
+                    if let Some(ref order_id) = no_order_id_clone {
+                        info!("[REBALANCE] Cancelling NO order {}", order_id);
+                        match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
+                            Ok(Ok(_)) => {
+                                // Cancel succeeded, query final fill amount
+                                if let Ok(Ok(order_info)) = timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
+                                    info!("[REBALANCE] NO order final: {:?}", order_info);
+                                    final_no_filled = order_info.size_matched;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                error!("[REBALANCE] Failed to cancel NO order: {:?}. Aborting rebalance.", e);
+                                return;
+                            }
+                            Err(_) => {
+                                error!("[REBALANCE] Cancel NO order timed out. Aborting rebalance.");
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                info!("[REBALANCE] After cancels - YES: {}, NO: {}", final_yes_filled, final_no_filled);
+
+                // Helper closure to execute market sell and record to database
+                let execute_sell = |token_id: &str, amount: Decimal, side: &str| {
+                    let clob = &clob_client;
+                    let sig = &signer;
+                    let db = &db_clone;
+                    let pos_id = position_id_clone;
+                    let token = token_id.to_string();
+                    let side_name = side.to_string();
+                    async move {
+                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(amount) {
+                            Ok(a) => a,
+                            Err(_) => return,
+                        };
+                        let result = timeout(
+                            Duration::from_secs(ORDER_TIMEOUT_SECS),
+                            async {
+                                let order = clob
+                                    .market_order()
+                                    .token_id(&token)
+                                    .amount(sell_amount)
+                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                    .build()
+                                    .await?;
+                                let signed = clob.sign(sig, order).await?;
+                                clob.post_order(signed).await
+                            }
+                        ).await;
+                        match result {
+                            Ok(Ok(r)) => {
+                                let order_id = r.first().map(|o| o.order_id.clone()).unwrap_or_default();
+                                info!("[REBALANCE] {} sell result: order_id={}", side_name.to_uppercase(), order_id);
+                                if let Err(e) = repository::record_trade_with_order(
+                                    db.pool(),
+                                    pos_id,
+                                    &side_name,
+                                    "sell",
+                                    Decimal::ZERO,
+                                    amount,
+                                    Some(&order_id),
+                                    amount,
+                                    "filled",
+                                ).await {
+                                    error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                }
+                            }
+                            Ok(Err(e)) => error!("[REBALANCE] {} sell failed: {:?}", side_name.to_uppercase(), e),
+                            Err(_) => error!("[REBALANCE] {} sell timed out", side_name.to_uppercase()),
+                        }
+                    }
+                };
+
+                // Sell imbalance and record to database
+                let imbalance = final_yes_filled - final_no_filled;
+                if imbalance > Decimal::ZERO {
+                    info!("[REBALANCE] Selling {} excess YES shares", imbalance);
+                    execute_sell(&yes_token_id, imbalance, "yes").await;
+                } else if imbalance < Decimal::ZERO {
+                    let excess_no = -imbalance;
+                    info!("[REBALANCE] Selling {} excess NO shares", excess_no);
+                    execute_sell(&no_token_id, excess_no, "no").await;
+                } else {
+                    info!("[REBALANCE] Position balanced, no action needed");
+                }
+            });
+        }
 
         Ok(())
     }
