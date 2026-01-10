@@ -100,11 +100,6 @@ impl TradeExecutor {
         // Collect top 10 markets by profit (including negative)
         metrics.top_markets = self.get_top_markets(&markets, 10);
 
-        // Print market analysis if verbose
-        if verbose {
-            self.print_market_analysis(&markets);
-        }
-
         // Step 3: Execute on best opportunity
         if let Some(best) = opportunities.first() {
             self.state = BotState::Trading;
