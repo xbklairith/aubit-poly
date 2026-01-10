@@ -282,15 +282,37 @@ impl TradeExecutor {
             return Ok(());
         }
 
-        // Place NO order
+        // Check how many YES shares were actually filled
+        // taking_amount = shares received, making_amount = USDC spent
+        let yes_filled = yes_result.first()
+            .map(|r| Decimal::try_from(r.taking_amount).unwrap_or(dec!(0)))
+            .unwrap_or(dec!(0));
+
+        // If partial fill, use filled amount for NO order to stay balanced
+        let actual_no_size = if yes_filled > dec!(0) && yes_filled < yes_size {
+            warn!(
+                "[LIVE] YES order partial fill: requested {}, got {}. Adjusting NO to match.",
+                yes_size, yes_filled
+            );
+            yes_filled.round_dp(2)
+        } else if yes_filled == dec!(0) {
+            // Order is Live (limit order waiting) - use original size
+            // The order may fill later
+            info!("[LIVE] YES order is Live (limit), proceeding with NO order");
+            no_size
+        } else {
+            no_size
+        };
+
+        // Place NO order with matched size
         info!(
             "[LIVE] Building NO order: token={}, size={}, price={}",
-            opportunity.no_token_id, no_size, no_price
+            opportunity.no_token_id, actual_no_size, no_price
         );
         let no_order = clob_client
             .limit_order()
             .token_id(&opportunity.no_token_id)
-            .size(no_size)
+            .size(actual_no_size)
             .price(no_price)
             .side(polymarket_client_sdk::clob::types::Side::Buy)
             .build()
