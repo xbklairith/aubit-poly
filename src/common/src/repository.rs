@@ -605,6 +605,10 @@ mod tests {
             no_token_id: "test-no-token".to_string(),
             name: "Test market: Will BTC go up?".to_string(),
             end_time: Utc::now() + Duration::hours(2),
+            yes_best_bid: None,
+            yes_best_ask: None,
+            no_best_bid: None,
+            no_best_ask: None,
         };
 
         // Insert new market

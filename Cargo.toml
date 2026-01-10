@@ -50,3 +50,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.36", features = ["serde", "serde-with-str"] }
 url = "2.5"
 futures-util = "0.3"
+
+# Testing
+mockall = "0.13"
+async-trait = "0.1"

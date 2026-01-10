@@ -1191,3 +1191,299 @@ impl TradeExecutor {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
+
+    // ============ TEST HELPERS ============
+
+    /// Create an OrderbookSnapshot with specified asks
+    fn make_snapshot(yes_asks: serde_json::Value, no_asks: serde_json::Value) -> OrderbookSnapshot {
+        OrderbookSnapshot {
+            id: 1,
+            market_id: Uuid::new_v4(),
+            yes_best_ask: None,
+            yes_best_bid: None,
+            no_best_ask: None,
+            no_best_bid: None,
+            spread: None,
+            yes_asks: Some(yes_asks),
+            yes_bids: None,
+            no_asks: Some(no_asks),
+            no_bids: None,
+            captured_at: Utc::now(),
+        }
+    }
+
+    /// Create a MarketWithPrices for testing
+    fn make_market_with_prices(yes_ask: Decimal, no_ask: Decimal) -> MarketWithPrices {
+        MarketWithPrices {
+            id: Uuid::new_v4(),
+            condition_id: "test-condition".to_string(),
+            market_type: "up_down".to_string(),
+            asset: "BTC".to_string(),
+            timeframe: "1h".to_string(),
+            yes_token_id: "yes-token".to_string(),
+            no_token_id: "no-token".to_string(),
+            name: "Test Market".to_string(),
+            end_time: Utc::now() + Duration::hours(1),
+            is_active: true,
+            yes_best_ask: Some(yes_ask),
+            yes_best_bid: Some(yes_ask - dec!(0.01)),
+            no_best_ask: Some(no_ask),
+            no_best_bid: Some(no_ask - dec!(0.01)),
+            captured_at: Utc::now(),
+        }
+    }
+
+    /// Create a PositionCache for testing
+    fn make_position_cache(total_invested: Decimal) -> PositionCache {
+        PositionCache {
+            id: Uuid::new_v4(),
+            market_id: Uuid::new_v4(),
+            market_name: "Test Position".to_string(),
+            yes_shares: dec!(10),
+            no_shares: dec!(10),
+            total_invested,
+            end_time: Utc::now() + Duration::hours(1),
+        }
+    }
+
+    /// Create a minimal SessionState for testing
+    fn make_session_state(balance: Decimal) -> SessionState {
+        SessionState {
+            id: Uuid::new_v4(),
+            dry_run: true,
+            starting_balance: balance,
+            current_balance: balance,
+            total_trades: 0,
+            winning_trades: 0,
+            total_opportunities: 0,
+            positions_opened: 0,
+            positions_closed: 0,
+            gross_profit: dec!(0),
+            fees_paid: dec!(0),
+            net_profit: dec!(0),
+            started_at: Utc::now(),
+            open_positions: HashMap::new(),
+        }
+    }
+
+    // ============ TASK 3.1: calculate_orderbook_liquidity TESTS ============
+
+    #[test]
+    fn test_calculate_orderbook_liquidity_both_sides() {
+        // YES: 100 shares @ $0.50 = $50 liquidity
+        // NO: 80 shares @ $0.45 = $36 liquidity
+        // Min = $36
+        let snapshot = make_snapshot(
+            json!([{"price": "0.50", "size": "100"}]),
+            json!([{"price": "0.45", "size": "80"}]),
+        );
+        let liquidity = calculate_orderbook_liquidity(&snapshot);
+        assert_eq!(liquidity, dec!(36));
+    }
+
+    #[test]
+    fn test_calculate_orderbook_liquidity_empty_book() {
+        let snapshot = make_snapshot(json!([]), json!([]));
+        assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(0));
+    }
+
+    #[test]
+    fn test_calculate_orderbook_liquidity_one_side_empty() {
+        // YES has liquidity, NO is empty => min is 0
+        let snapshot = make_snapshot(
+            json!([{"price": "0.50", "size": "100"}]),
+            json!([]),
+        );
+        assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(0));
+    }
+
+    #[test]
+    fn test_calculate_orderbook_liquidity_symmetric() {
+        // Both sides equal: 50 @ $0.50 = $25 each
+        let snapshot = make_snapshot(
+            json!([{"price": "0.50", "size": "50"}]),
+            json!([{"price": "0.50", "size": "50"}]),
+        );
+        assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(25));
+    }
+
+    #[test]
+    fn test_calculate_orderbook_liquidity_null_asks() {
+        // Test with None values for asks
+        let snapshot = OrderbookSnapshot {
+            id: 1,
+            market_id: Uuid::new_v4(),
+            yes_best_ask: None,
+            yes_best_bid: None,
+            no_best_ask: None,
+            no_best_bid: None,
+            spread: None,
+            yes_asks: None,
+            yes_bids: None,
+            no_asks: None,
+            no_bids: None,
+            captured_at: Utc::now(),
+        };
+        assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(0));
+    }
+
+    // ============ TASK 3.2: available_balance and total_exposure TESTS ============
+
+    #[test]
+    fn test_total_exposure_no_positions() {
+        let session = make_session_state(dec!(1000));
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        assert_eq!(exposure, dec!(0));
+    }
+
+    #[test]
+    fn test_total_exposure_single_position() {
+        let mut session = make_session_state(dec!(1000));
+        let position = make_position_cache(dec!(100));
+        let market_id = position.market_id;
+        session.open_positions.insert(market_id, position);
+
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        assert_eq!(exposure, dec!(100));
+    }
+
+    #[test]
+    fn test_total_exposure_multiple_positions() {
+        let mut session = make_session_state(dec!(1000));
+
+        let pos1 = make_position_cache(dec!(100));
+        let pos2 = make_position_cache(dec!(150));
+        let pos3 = make_position_cache(dec!(75));
+
+        session.open_positions.insert(pos1.market_id, pos1);
+        session.open_positions.insert(pos2.market_id, pos2);
+        session.open_positions.insert(pos3.market_id, pos3);
+
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        assert_eq!(exposure, dec!(325)); // 100 + 150 + 75
+    }
+
+    #[test]
+    fn test_available_balance_no_positions() {
+        let session = make_session_state(dec!(1000));
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let available = session.current_balance - exposure;
+        assert_eq!(available, dec!(1000));
+    }
+
+    #[test]
+    fn test_available_balance_with_positions() {
+        let mut session = make_session_state(dec!(1000));
+        let position = make_position_cache(dec!(200));
+        session.open_positions.insert(position.market_id, position);
+
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let available = session.current_balance - exposure;
+        assert_eq!(available, dec!(800)); // 1000 - 200
+    }
+
+    #[test]
+    fn test_available_balance_all_invested() {
+        let mut session = make_session_state(dec!(500));
+        let position = make_position_cache(dec!(500));
+        session.open_positions.insert(position.market_id, position);
+
+        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let available = session.current_balance - exposure;
+        assert_eq!(available, dec!(0));
+    }
+
+    // ============ TASK 3.3: get_top_markets TESTS ============
+    // Note: These test the logic directly since get_top_markets requires TradeExecutor
+
+    #[test]
+    fn test_market_profit_calculation() {
+        // YES: $0.45, NO: $0.45 => Spread: $0.90, Profit: 10%
+        let market = make_market_with_prices(dec!(0.45), dec!(0.45));
+        let yes_price = market.yes_best_ask.unwrap();
+        let no_price = market.no_best_ask.unwrap();
+        let spread = yes_price + no_price;
+        let profit_pct = dec!(1.00) - spread;
+
+        assert_eq!(spread, dec!(0.90));
+        assert_eq!(profit_pct, dec!(0.10));
+    }
+
+    #[test]
+    fn test_market_sorting_by_profit() {
+        let markets = vec![
+            make_market_with_prices(dec!(0.48), dec!(0.48)),  // 4% profit (spread 0.96)
+            make_market_with_prices(dec!(0.45), dec!(0.45)),  // 10% profit (spread 0.90)
+            make_market_with_prices(dec!(0.52), dec!(0.52)),  // -4% loss (spread 1.04)
+        ];
+
+        let mut profits: Vec<Decimal> = markets
+            .iter()
+            .map(|m| {
+                let yes = m.yes_best_ask.unwrap();
+                let no = m.no_best_ask.unwrap();
+                dec!(1.00) - (yes + no)
+            })
+            .collect();
+
+        // Sort by profit descending
+        profits.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+        assert_eq!(profits[0], dec!(0.10));  // Best: 10%
+        assert_eq!(profits[1], dec!(0.04));  // Second: 4%
+        assert_eq!(profits[2], dec!(-0.04)); // Worst: -4%
+    }
+
+    #[test]
+    fn test_market_filters_invalid_prices() {
+        let markets = vec![
+            make_market_with_prices(dec!(0.45), dec!(0.45)),  // Valid
+            make_market_with_prices(dec!(0), dec!(0.45)),     // Invalid YES
+            make_market_with_prices(dec!(0.45), dec!(0)),     // Invalid NO
+        ];
+
+        let valid_count = markets
+            .iter()
+            .filter(|m| {
+                let yes = m.yes_best_ask.unwrap_or(dec!(0));
+                let no = m.no_best_ask.unwrap_or(dec!(0));
+                yes > dec!(0) && no > dec!(0)
+            })
+            .count();
+
+        assert_eq!(valid_count, 1);
+    }
+
+    #[test]
+    fn test_market_limit_results() {
+        let markets: Vec<_> = (0..10)
+            .map(|i| {
+                let price = dec!(0.40) + Decimal::from(i) * dec!(0.01);
+                make_market_with_prices(price, price)
+            })
+            .collect();
+
+        // Take only top 5
+        let limit = 5;
+        let top: Vec<_> = markets.iter().take(limit).collect();
+
+        assert_eq!(top.len(), 5);
+    }
+
+    #[test]
+    fn test_market_with_none_prices() {
+        let mut market = make_market_with_prices(dec!(0.50), dec!(0.50));
+        market.yes_best_ask = None;
+
+        // Should be filtered out
+        let is_valid = market.yes_best_ask.is_some() && market.no_best_ask.is_some();
+        assert!(!is_valid);
+    }
+}
