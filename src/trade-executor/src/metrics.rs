@@ -134,3 +134,157 @@ impl AggregateMetrics {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    // ============ CycleMetrics TESTS ============
+
+    #[test]
+    fn test_cycle_metrics_new_has_defaults() {
+        let metrics = CycleMetrics::new();
+
+        assert_eq!(metrics.total_cycle_ms, 0);
+        assert_eq!(metrics.market_query_ms, 0);
+        assert_eq!(metrics.detection_ms, 0);
+        assert_eq!(metrics.execution_ms, 0);
+        assert_eq!(metrics.settlement_ms, 0);
+        assert_eq!(metrics.markets_scanned, 0);
+        assert_eq!(metrics.opportunities_found, 0);
+        assert_eq!(metrics.trades_executed, 0);
+        assert_eq!(metrics.positions_settled, 0);
+        assert!(metrics.top_markets.is_empty());
+    }
+
+    #[test]
+    fn test_cycle_metrics_default_trait() {
+        let metrics = CycleMetrics::default();
+        assert_eq!(metrics.total_cycle_ms, 0);
+    }
+
+    // ============ MarketSummary TESTS ============
+
+    #[test]
+    fn test_market_summary_creation() {
+        let summary = MarketSummary {
+            name: "Will BTC go up in the next hour?".to_string(),
+            asset: "BTC".to_string(),
+            yes_price: dec!(0.45),
+            no_price: dec!(0.45),
+            spread: dec!(0.90),
+            profit_pct: dec!(0.10),
+        };
+
+        assert_eq!(summary.asset, "BTC");
+        assert_eq!(summary.profit_pct, dec!(0.10));
+    }
+
+    #[test]
+    fn test_market_summary_long_name() {
+        // Test that long names are stored correctly (truncation happens elsewhere)
+        let long_name = "A".repeat(100);
+        let summary = MarketSummary {
+            name: long_name.clone(),
+            asset: "ETH".to_string(),
+            yes_price: dec!(0.50),
+            no_price: dec!(0.50),
+            spread: dec!(1.00),
+            profit_pct: dec!(0.00),
+        };
+
+        assert_eq!(summary.name.len(), 100);
+    }
+
+    // ============ AggregateMetrics TESTS ============
+
+    #[test]
+    fn test_aggregate_metrics_empty_cycles() {
+        let aggregate = AggregateMetrics::from_cycles(&[]);
+
+        assert_eq!(aggregate.cycles, 0);
+        assert_eq!(aggregate.total_time_ms, 0);
+        assert_eq!(aggregate.avg_cycle_ms, 0.0);
+        assert_eq!(aggregate.min_cycle_ms, 0);
+        assert_eq!(aggregate.max_cycle_ms, 0);
+    }
+
+    #[test]
+    fn test_aggregate_metrics_single_cycle() {
+        let cycle = CycleMetrics {
+            total_cycle_ms: 100,
+            market_query_ms: 50,
+            detection_ms: 20,
+            execution_ms: 30,
+            ..Default::default()
+        };
+
+        let aggregate = AggregateMetrics::from_cycles(&[cycle]);
+
+        assert_eq!(aggregate.cycles, 1);
+        assert_eq!(aggregate.total_time_ms, 100);
+        assert_eq!(aggregate.avg_cycle_ms, 100.0);
+        assert_eq!(aggregate.min_cycle_ms, 100);
+        assert_eq!(aggregate.max_cycle_ms, 100);
+    }
+
+    #[test]
+    fn test_aggregate_metrics_multiple_cycles() {
+        let cycles = vec![
+            CycleMetrics {
+                total_cycle_ms: 50,
+                market_query_ms: 20,
+                detection_ms: 10,
+                execution_ms: 15,
+                ..Default::default()
+            },
+            CycleMetrics {
+                total_cycle_ms: 100,
+                market_query_ms: 40,
+                detection_ms: 20,
+                execution_ms: 30,
+                ..Default::default()
+            },
+            CycleMetrics {
+                total_cycle_ms: 150,
+                market_query_ms: 60,
+                detection_ms: 30,
+                execution_ms: 45,
+                ..Default::default()
+            },
+        ];
+
+        let aggregate = AggregateMetrics::from_cycles(&cycles);
+
+        assert_eq!(aggregate.cycles, 3);
+        assert_eq!(aggregate.total_time_ms, 300); // 50 + 100 + 150
+        assert_eq!(aggregate.avg_cycle_ms, 100.0); // 300 / 3
+        assert_eq!(aggregate.min_cycle_ms, 50);
+        assert_eq!(aggregate.max_cycle_ms, 150);
+        assert_eq!(aggregate.avg_query_ms, 40.0); // (20 + 40 + 60) / 3
+        assert_eq!(aggregate.avg_detection_ms, 20.0); // (10 + 20 + 30) / 3
+        assert_eq!(aggregate.avg_execution_ms, 30.0); // (15 + 30 + 45) / 3
+    }
+
+    #[test]
+    fn test_aggregate_metrics_percentiles() {
+        // Create 100 cycles with increasing times (1 to 100)
+        let cycles: Vec<CycleMetrics> = (1..=100)
+            .map(|i| CycleMetrics {
+                total_cycle_ms: i as u64,
+                ..Default::default()
+            })
+            .collect();
+
+        let aggregate = AggregateMetrics::from_cycles(&cycles);
+
+        assert_eq!(aggregate.cycles, 100);
+        assert_eq!(aggregate.min_cycle_ms, 1);
+        assert_eq!(aggregate.max_cycle_ms, 100);
+        // Note: p50 is index 50 (0-based), which is value 51 (since values are 1-100)
+        assert_eq!(aggregate.p50_cycle_ms, 51); // index 50 = value 51
+        assert_eq!(aggregate.p95_cycle_ms, 96); // index 95 = value 96
+        assert_eq!(aggregate.p99_cycle_ms, 100); // index 99 = value 100
+    }
+}

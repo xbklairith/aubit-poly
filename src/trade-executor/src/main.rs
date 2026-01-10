@@ -14,6 +14,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use common::{Config, Database};
 
+mod clob_ops;
 mod config;
 mod detector;
 mod executor;
