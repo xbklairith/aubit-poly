@@ -9,8 +9,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::signal;
 use tokio::time::sleep;
-use tracing::{error, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 use common::{Config, Database};
 
@@ -93,13 +93,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+    // Initialize logging with RUST_LOG env var support (default: info)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info"))
+        )
         .with_target(false)
         .compact()
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+        .init();
 
     let args = Args::parse();
 
