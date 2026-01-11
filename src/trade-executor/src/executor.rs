@@ -884,27 +884,94 @@ impl TradeExecutor {
                         // Retry market sell up to 3 times
                         const MAX_SELL_RETRIES: u32 = 3;
                         for attempt in 1..=MAX_SELL_RETRIES {
-                            let result = timeout(
-                                Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                async {
-                                    let order = clob
-                                        .market_order()
-                                        .token_id(&token)
-                                        .amount(sell_amount.clone())
-                                        .side(polymarket_client_sdk::clob::types::Side::Sell)
-                                        .order_type(OrderType::FOK)
-                                        .build()
-                                        .await?;
-                                    let signed = clob.sign(sig, order).await?;
-                                    clob.post_order(signed).await
-                                }
-                            ).await;
-                            match result {
-                                Ok(Ok(r)) => {
-                                    if let Some(order) = r.first() {
-                                        // Log full response for debugging
-                                        debug!("[REBALANCE] {} sell response: {:?}", side_name.to_uppercase(), order);
+                            info!("[REBALANCE] {} sell attempt {}/{}: token={} amount={} type=FOK side=Sell",
+                                side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, &token, floored_amount);
 
+                            // Step 1: Build the order
+                            info!("[REBALANCE] {} sell: building market order...", side_name.to_uppercase());
+                            let order_result = timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                clob
+                                    .market_order()
+                                    .token_id(&token)
+                                    .amount(sell_amount.clone())
+                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                    .order_type(OrderType::FOK)
+                                    .build()
+                            ).await;
+
+                            let order = match order_result {
+                                Ok(Ok(o)) => {
+                                    info!("[REBALANCE] {} sell: order built successfully", side_name.to_uppercase());
+                                    debug!("[REBALANCE] {} sell: order details: {:?}", side_name.to_uppercase(), o);
+                                    o
+                                }
+                                Ok(Err(e)) => {
+                                    error!("[REBALANCE] {} sell: failed to build order (attempt {}/{}): {:?}",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
+                                    if attempt < MAX_SELL_RETRIES {
+                                        let delay = 2u64.pow(attempt);
+                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    }
+                                    continue;
+                                }
+                                Err(_) => {
+                                    error!("[REBALANCE] {} sell: order build timed out (attempt {}/{})",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                    if attempt < MAX_SELL_RETRIES {
+                                        let delay = 2u64.pow(attempt);
+                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            // Step 2: Sign the order
+                            info!("[REBALANCE] {} sell: signing order...", side_name.to_uppercase());
+                            let signed_result = timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                clob.sign(sig, order)
+                            ).await;
+
+                            let signed = match signed_result {
+                                Ok(Ok(s)) => {
+                                    info!("[REBALANCE] {} sell: order signed successfully", side_name.to_uppercase());
+                                    debug!("[REBALANCE] {} sell: signed order: {:?}", side_name.to_uppercase(), s);
+                                    s
+                                }
+                                Ok(Err(e)) => {
+                                    error!("[REBALANCE] {} sell: failed to sign order (attempt {}/{}): {:?}",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
+                                    if attempt < MAX_SELL_RETRIES {
+                                        let delay = 2u64.pow(attempt);
+                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    }
+                                    continue;
+                                }
+                                Err(_) => {
+                                    error!("[REBALANCE] {} sell: order signing timed out (attempt {}/{})",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                    if attempt < MAX_SELL_RETRIES {
+                                        let delay = 2u64.pow(attempt);
+                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            // Step 3: Post the order
+                            info!("[REBALANCE] {} sell: posting order to CLOB...", side_name.to_uppercase());
+                            let post_result = timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                clob.post_order(signed)
+                            ).await;
+
+                            match post_result {
+                                Ok(Ok(r)) => {
+                                    info!("[REBALANCE] {} sell: received response with {} order(s)", side_name.to_uppercase(), r.len());
+                                    debug!("[REBALANCE] {} sell: full response: {:?}", side_name.to_uppercase(), r);
+
+                                    if let Some(order) = r.first() {
                                         let order_id = &order.order_id;
                                         let filled = order.taking_amount;
                                         let has_error = order.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
@@ -912,12 +979,17 @@ impl TradeExecutor {
                                         info!("[REBALANCE] {} sell result: order_id={} filled={} success={} status={:?} error={:?}",
                                             side_name.to_uppercase(), order_id, filled, order.success, order.status, order.error_msg);
 
+                                        // Log additional fields if available
+                                        info!("[REBALANCE] {} sell details: making_amount={} taking_amount={} tx_hashes={:?}",
+                                            side_name.to_uppercase(), order.making_amount, order.taking_amount, order.transaction_hashes);
+
                                         // Check if order actually succeeded
                                         if !order.success || has_error || order_id.is_empty() {
                                             warn!("[REBALANCE] {} sell order failed (attempt {}/{}): success={} error={:?}",
                                                 side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, order.success, order.error_msg);
                                         } else {
                                             // Order succeeded, record it
+                                            info!("[REBALANCE] {} sell SUCCESS: filled {} of {} shares", side_name.to_uppercase(), filled, floored_amount);
                                             if let Err(e) = repository::record_trade_with_order(
                                                 db.pool(),
                                                 pos_id,
@@ -934,19 +1006,23 @@ impl TradeExecutor {
                                             return; // Success, exit retry loop
                                         }
                                     } else {
-                                        warn!("[REBALANCE] {} sell empty response (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                        warn!("[REBALANCE] {} sell: empty response array (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                     }
                                 }
                                 Ok(Err(e)) => {
-                                    warn!("[REBALANCE] {} sell failed (attempt {}/{}): {:?}", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
+                                    error!("[REBALANCE] {} sell: post_order failed (attempt {}/{}): {:?}",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
                                 }
                                 Err(_) => {
-                                    warn!("[REBALANCE] {} sell timed out (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                    error!("[REBALANCE] {} sell: post_order timed out (attempt {}/{})",
+                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                 }
                             }
+
                             // Exponential backoff before retry (2s, 4s, 8s)
                             if attempt < MAX_SELL_RETRIES {
                                 let delay = 2u64.pow(attempt);
+                                info!("[REBALANCE] {} sell: waiting {}s before retry...", side_name.to_uppercase(), delay);
                                 tokio::time::sleep(Duration::from_secs(delay)).await;
                             }
                         }
