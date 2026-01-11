@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::Config;
 
@@ -282,7 +282,7 @@ impl GammaClient {
             }
         }
 
-        debug!("Fetched {} total open events", all_events.len());
+        info!("Fetched {} total open events", all_events.len());
         Ok(all_events)
     }
 
@@ -309,7 +309,7 @@ impl GammaClient {
                     );
                 }
                 Err(e) => {
-                    debug!("Failed to fetch series {}: {}", series_name, e);
+                    warn!("Failed to fetch series {}: {}", series_name, e);
                     // Continue with other series
                 }
             }

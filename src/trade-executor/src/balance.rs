@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 /// Position data from Gamma Data API.
 #[derive(Debug, Clone, Deserialize)]
@@ -61,7 +61,7 @@ impl BalanceChecker for GammaBalanceChecker {
         let positions = self.get_all_positions().await?;
         let balance = find_balance(&positions, token_id);
 
-        debug!(
+        info!(
             "[BALANCE] Token {} balance: {}",
             &token_id[..20.min(token_id.len())],
             balance
@@ -73,7 +73,7 @@ impl BalanceChecker for GammaBalanceChecker {
     async fn get_all_positions(&self) -> Result<Vec<PositionData>> {
         let url = format!("{}/positions?user={}", self.base_url, self.user_address);
 
-        debug!("[BALANCE] Fetching positions from {}", url);
+        info!("[BALANCE] Fetching positions from {}", url);
 
         let response = self.client.get(&url).send().await?;
 
@@ -86,7 +86,7 @@ impl BalanceChecker for GammaBalanceChecker {
         }
 
         let positions: Vec<PositionData> = response.json().await?;
-        debug!("[BALANCE] Fetched {} positions", positions.len());
+        info!("[BALANCE] Fetched {} positions", positions.len());
 
         Ok(positions)
     }
