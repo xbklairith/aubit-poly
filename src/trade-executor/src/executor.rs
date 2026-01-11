@@ -791,6 +791,7 @@ impl TradeExecutor {
                 // Start with initial fill values - only query API for sides that were unfilled
                 let mut final_yes_filled = yes_filled_initial;
                 let mut final_no_filled = no_filled_initial;
+                let mut cancel_failed = false;
 
                 // Cancel and get final fill for YES order (only if it was unfilled)
                 if yes_unfilled {
@@ -799,45 +800,60 @@ impl TradeExecutor {
                         match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
                             Ok(Ok(_)) => {
                                 // Cancel succeeded, query final fill amount
-                                if let Ok(Ok(order_info)) = timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
-                                    info!("[REBALANCE] YES order final: {:?}", order_info);
-                                    final_yes_filled = order_info.size_matched;
+                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
+                                    Ok(Ok(order_info)) => {
+                                        info!("[REBALANCE] YES order final: {:?}", order_info);
+                                        final_yes_filled = order_info.size_matched;
+                                    }
+                                    Ok(Err(e)) => warn!("[REBALANCE] Failed to query YES order: {:?}, using initial fill", e),
+                                    Err(_) => warn!("[REBALANCE] YES order query timed out, using initial fill"),
                                 }
                             }
                             Ok(Err(e)) => {
-                                error!("[REBALANCE] Failed to cancel YES order: {:?}. Aborting rebalance.", e);
-                                return;
+                                error!("[REBALANCE] Failed to cancel YES order: {:?}", e);
+                                cancel_failed = true;
                             }
                             Err(_) => {
-                                error!("[REBALANCE] Cancel YES order timed out. Aborting rebalance.");
-                                return;
+                                error!("[REBALANCE] Cancel YES order timed out");
+                                cancel_failed = true;
                             }
                         }
                     }
                 }
 
                 // Cancel and get final fill for NO order (only if it was unfilled)
+                // Try even if YES cancel failed
                 if no_unfilled {
                     if let Some(ref order_id) = no_order_id_clone {
                         info!("[REBALANCE] Cancelling NO order {}", order_id);
                         match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
                             Ok(Ok(_)) => {
                                 // Cancel succeeded, query final fill amount
-                                if let Ok(Ok(order_info)) = timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
-                                    info!("[REBALANCE] NO order final: {:?}", order_info);
-                                    final_no_filled = order_info.size_matched;
+                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
+                                    Ok(Ok(order_info)) => {
+                                        info!("[REBALANCE] NO order final: {:?}", order_info);
+                                        final_no_filled = order_info.size_matched;
+                                    }
+                                    Ok(Err(e)) => warn!("[REBALANCE] Failed to query NO order: {:?}, using initial fill", e),
+                                    Err(_) => warn!("[REBALANCE] NO order query timed out, using initial fill"),
                                 }
                             }
                             Ok(Err(e)) => {
-                                error!("[REBALANCE] Failed to cancel NO order: {:?}. Aborting rebalance.", e);
-                                return;
+                                error!("[REBALANCE] Failed to cancel NO order: {:?}", e);
+                                cancel_failed = true;
                             }
                             Err(_) => {
-                                error!("[REBALANCE] Cancel NO order timed out. Aborting rebalance.");
-                                return;
+                                error!("[REBALANCE] Cancel NO order timed out");
+                                cancel_failed = true;
                             }
                         }
                     }
+                }
+
+                // Abort if any cancel failed - position state unknown
+                if cancel_failed {
+                    error!("[REBALANCE] Aborting due to cancel failure - manual intervention needed");
+                    return;
                 }
 
                 info!("[REBALANCE] After cancels - YES: {}, NO: {}", final_yes_filled, final_no_filled);
@@ -864,41 +880,62 @@ impl TradeExecutor {
                                 return;
                             }
                         };
-                        let result = timeout(
-                            Duration::from_secs(ORDER_TIMEOUT_SECS),
-                            async {
-                                let order = clob
-                                    .market_order()
-                                    .token_id(&token)
-                                    .amount(sell_amount)
-                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
-                                    .build()
-                                    .await?;
-                                let signed = clob.sign(sig, order).await?;
-                                clob.post_order(signed).await
-                            }
-                        ).await;
-                        match result {
-                            Ok(Ok(r)) => {
-                                let order_id = r.first().map(|o| o.order_id.clone()).unwrap_or_default();
-                                info!("[REBALANCE] {} sell result: order_id={} (sold {})", side_name.to_uppercase(), order_id, floored_amount);
-                                if let Err(e) = repository::record_trade_with_order(
-                                    db.pool(),
-                                    pos_id,
-                                    &side_name,
-                                    "sell",
-                                    Decimal::ZERO,
-                                    floored_amount,
-                                    Some(&order_id),
-                                    floored_amount,
-                                    "filled",
-                                ).await {
-                                    error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+
+                        // Retry market sell up to 3 times
+                        const MAX_SELL_RETRIES: u32 = 3;
+                        for attempt in 1..=MAX_SELL_RETRIES {
+                            let result = timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                async {
+                                    let order = clob
+                                        .market_order()
+                                        .token_id(&token)
+                                        .amount(sell_amount.clone())
+                                        .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                        .build()
+                                        .await?;
+                                    let signed = clob.sign(sig, order).await?;
+                                    clob.post_order(signed).await
+                                }
+                            ).await;
+                            match result {
+                                Ok(Ok(r)) => {
+                                    if let Some(order) = r.first() {
+                                        let order_id = &order.order_id;
+                                        let filled = order.taking_amount;
+                                        info!("[REBALANCE] {} sell result: order_id={} filled={}", side_name.to_uppercase(), order_id, filled);
+                                        if let Err(e) = repository::record_trade_with_order(
+                                            db.pool(),
+                                            pos_id,
+                                            &side_name,
+                                            "sell",
+                                            Decimal::ZERO,
+                                            filled,
+                                            Some(order_id),
+                                            floored_amount,
+                                            if filled >= floored_amount { "filled" } else { "partial" },
+                                        ).await {
+                                            error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                        }
+                                        return; // Success, exit retry loop
+                                    } else {
+                                        warn!("[REBALANCE] {} sell empty response (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("[REBALANCE] {} sell failed (attempt {}/{}): {:?}", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
+                                }
+                                Err(_) => {
+                                    warn!("[REBALANCE] {} sell timed out (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                 }
                             }
-                            Ok(Err(e)) => error!("[REBALANCE] {} sell failed: {:?}", side_name.to_uppercase(), e),
-                            Err(_) => error!("[REBALANCE] {} sell timed out", side_name.to_uppercase()),
+                            // Exponential backoff before retry (2s, 4s, 8s)
+                            if attempt < MAX_SELL_RETRIES {
+                                let delay = 2u64.pow(attempt);
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                            }
                         }
+                        error!("[REBALANCE] {} sell failed after {} attempts", side_name.to_uppercase(), MAX_SELL_RETRIES);
                     }
                 };
 
