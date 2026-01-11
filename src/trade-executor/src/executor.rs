@@ -9,7 +9,7 @@ use alloy::signers::local::LocalSigner;
 use alloy::signers::Signer;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use polymarket_client_sdk::clob::types::SignatureType;
+use polymarket_client_sdk::clob::types::{OrderType, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
@@ -892,6 +892,7 @@ impl TradeExecutor {
                                         .token_id(&token)
                                         .amount(sell_amount.clone())
                                         .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                        .order_type(OrderType::FOK)
                                         .build()
                                         .await?;
                                     let signed = clob.sign(sig, order).await?;
@@ -901,23 +902,37 @@ impl TradeExecutor {
                             match result {
                                 Ok(Ok(r)) => {
                                     if let Some(order) = r.first() {
+                                        // Log full response for debugging
+                                        debug!("[REBALANCE] {} sell response: {:?}", side_name.to_uppercase(), order);
+
                                         let order_id = &order.order_id;
                                         let filled = order.taking_amount;
-                                        info!("[REBALANCE] {} sell result: order_id={} filled={}", side_name.to_uppercase(), order_id, filled);
-                                        if let Err(e) = repository::record_trade_with_order(
-                                            db.pool(),
-                                            pos_id,
-                                            &side_name,
-                                            "sell",
-                                            Decimal::ZERO,
-                                            filled,
-                                            Some(order_id),
-                                            floored_amount,
-                                            if filled >= floored_amount { "filled" } else { "partial" },
-                                        ).await {
-                                            error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                        let has_error = order.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
+
+                                        info!("[REBALANCE] {} sell result: order_id={} filled={} success={} status={:?} error={:?}",
+                                            side_name.to_uppercase(), order_id, filled, order.success, order.status, order.error_msg);
+
+                                        // Check if order actually succeeded
+                                        if !order.success || has_error || order_id.is_empty() {
+                                            warn!("[REBALANCE] {} sell order failed (attempt {}/{}): success={} error={:?}",
+                                                side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, order.success, order.error_msg);
+                                        } else {
+                                            // Order succeeded, record it
+                                            if let Err(e) = repository::record_trade_with_order(
+                                                db.pool(),
+                                                pos_id,
+                                                &side_name,
+                                                "sell",
+                                                Decimal::ZERO,
+                                                filled,
+                                                Some(order_id),
+                                                floored_amount,
+                                                if filled >= floored_amount { "filled" } else { "partial" },
+                                            ).await {
+                                                error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                            }
+                                            return; // Success, exit retry loop
                                         }
-                                        return; // Success, exit retry loop
                                     } else {
                                         warn!("[REBALANCE] {} sell empty response (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                     }
