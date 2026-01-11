@@ -1440,7 +1440,7 @@ impl TradeExecutor {
                                         side_name.to_uppercase(),
                                         r.len()
                                     );
-                                        debug!(
+                                        info!(
                                             "[REBALANCE] {} sell: full response: {:?}",
                                             side_name.to_uppercase(),
                                             r
