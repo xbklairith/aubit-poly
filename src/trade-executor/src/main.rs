@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 use common::{Config, Database};
 
+mod balance;
 mod clob_ops;
 mod config;
 mod detector;

@@ -4907,6 +4907,7 @@ dependencies = [
  "dotenvy",
  "mockall",
  "polymarket-client-sdk",
+ "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",

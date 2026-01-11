@@ -40,6 +40,11 @@ use common::models::OrderbookSnapshot;
 use common::repository::{self, MarketWithPrices};
 use common::Database;
 
+use crate::balance::{BalanceChecker, GammaBalanceChecker, calculate_safe_sell_amount, find_balance};
+
+/// Gamma Data API URL for balance queries
+const GAMMA_DATA_API_URL: &str = "https://data-api.polymarket.com";
+
 /// Calculate available liquidity from orderbook depth at best ask price.
 /// Returns the minimum USDC value available at best ask between YES and NO sides.
 /// (For spread arb, we need liquidity on BOTH sides - limited by the smaller one)
@@ -1156,13 +1161,56 @@ impl TradeExecutor {
 
                 // Sell imbalance and record to database
                 let imbalance = final_yes_filled - final_no_filled;
+
+                // Fetch all positions once to get both YES and NO balances
+                let user_address = proxy_wallet_clone
+                    .unwrap_or_else(|| format!("{}", signer.address()));
+                let balance_checker = GammaBalanceChecker::new(GAMMA_DATA_API_URL, &user_address);
+
+                let positions = match balance_checker.get_all_positions().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("[REBALANCE] Failed to query positions, using calculated imbalance: {:?}", e);
+                        vec![]
+                    }
+                };
+
                 if imbalance > Decimal::ZERO {
-                    info!("[REBALANCE] Selling {} excess YES shares", imbalance);
-                    execute_sell(&yes_token_id, imbalance, "yes").await;
+                    // Get YES balance from cached positions
+                    let actual_balance = if positions.is_empty() {
+                        imbalance // Fallback to calculated imbalance
+                    } else {
+                        find_balance(&positions, &yes_token_id)
+                    };
+
+                    let safe_sell_amount = calculate_safe_sell_amount(imbalance, actual_balance);
+                    if safe_sell_amount <= Decimal::ZERO {
+                        warn!("[REBALANCE] No YES tokens available to sell (balance: {}, imbalance: {})",
+                            actual_balance, imbalance);
+                    } else {
+                        info!("[REBALANCE] Selling {} excess YES shares (balance: {}, imbalance: {})",
+                            safe_sell_amount, actual_balance, imbalance);
+                        execute_sell(&yes_token_id, safe_sell_amount, "yes").await;
+                    }
                 } else if imbalance < Decimal::ZERO {
                     let excess_no = -imbalance;
-                    info!("[REBALANCE] Selling {} excess NO shares", excess_no);
-                    execute_sell(&no_token_id, excess_no, "no").await;
+
+                    // Get NO balance from cached positions
+                    let actual_balance = if positions.is_empty() {
+                        excess_no // Fallback to calculated imbalance
+                    } else {
+                        find_balance(&positions, &no_token_id)
+                    };
+
+                    let safe_sell_amount = calculate_safe_sell_amount(excess_no, actual_balance);
+                    if safe_sell_amount <= Decimal::ZERO {
+                        warn!("[REBALANCE] No NO tokens available to sell (balance: {}, imbalance: {})",
+                            actual_balance, excess_no);
+                    } else {
+                        info!("[REBALANCE] Selling {} excess NO shares (balance: {}, imbalance: {})",
+                            safe_sell_amount, actual_balance, excess_no);
+                        execute_sell(&no_token_id, safe_sell_amount, "no").await;
+                    }
                 } else {
                     info!("[REBALANCE] Position balanced, no action needed");
                 }
