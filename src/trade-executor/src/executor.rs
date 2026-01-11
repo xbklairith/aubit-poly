@@ -90,6 +90,112 @@ fn calculate_orderbook_liquidity(snapshot: &OrderbookSnapshot) -> Decimal {
     yes_liquidity.min(no_liquidity)
 }
 
+/// Parse orderbook side (asks or bids) from JSON into price levels.
+fn parse_orderbook_side(json_value: &Option<serde_json::Value>) -> Vec<(Decimal, Decimal)> {
+    json_value
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|level| {
+                    let price = level
+                        .get("price")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Decimal>().ok())?;
+                    let size = level
+                        .get("size")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Decimal>().ok())?;
+                    Some((price, size))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Log market depth visualization before placing orders.
+/// Shows top N levels of the orderbook for both YES and NO sides.
+fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels: usize) {
+    let yes_asks = parse_orderbook_side(&snapshot.yes_asks);
+    let yes_bids = parse_orderbook_side(&snapshot.yes_bids);
+    let no_asks = parse_orderbook_side(&snapshot.no_asks);
+    let no_bids = parse_orderbook_side(&snapshot.no_bids);
+
+    // Build depth visualization string
+    let mut depth_lines = Vec::new();
+    depth_lines.push(format!("Market Depth: {}", market_name));
+    depth_lines.push(format!(
+        "{:^42} | {:^42}",
+        "YES", "NO"
+    ));
+    depth_lines.push(format!(
+        "{:>20} {:>20} | {:>20} {:>20}",
+        "BID", "ASK", "BID", "ASK"
+    ));
+    depth_lines.push(format!(
+        "{:-<20} {:-<20} | {:-<20} {:-<20}",
+        "", "", "", ""
+    ));
+
+    // Show levels (bids sorted descending, asks sorted ascending)
+    let mut yes_bids_sorted = yes_bids.clone();
+    let mut yes_asks_sorted = yes_asks.clone();
+    let mut no_bids_sorted = no_bids.clone();
+    let mut no_asks_sorted = no_asks.clone();
+
+    yes_bids_sorted.sort_by(|a, b| b.0.cmp(&a.0)); // Descending
+    yes_asks_sorted.sort_by(|a, b| a.0.cmp(&b.0)); // Ascending
+    no_bids_sorted.sort_by(|a, b| b.0.cmp(&a.0));  // Descending
+    no_asks_sorted.sort_by(|a, b| a.0.cmp(&b.0));  // Ascending
+
+    for i in 0..max_levels {
+        let yes_bid = yes_bids_sorted
+            .get(i)
+            .map(|(p, s)| format!("${:.2} x {:.1}", p, s))
+            .unwrap_or_else(|| "-".to_string());
+        let yes_ask = yes_asks_sorted
+            .get(i)
+            .map(|(p, s)| format!("${:.2} x {:.1}", p, s))
+            .unwrap_or_else(|| "-".to_string());
+        let no_bid = no_bids_sorted
+            .get(i)
+            .map(|(p, s)| format!("${:.2} x {:.1}", p, s))
+            .unwrap_or_else(|| "-".to_string());
+        let no_ask = no_asks_sorted
+            .get(i)
+            .map(|(p, s)| format!("${:.2} x {:.1}", p, s))
+            .unwrap_or_else(|| "-".to_string());
+
+        depth_lines.push(format!(
+            "{:>20} {:>20} | {:>20} {:>20}",
+            yes_bid, yes_ask, no_bid, no_ask
+        ));
+    }
+
+    // Calculate totals
+    let yes_bid_total: Decimal = yes_bids.iter().map(|(p, s)| p * s).sum();
+    let yes_ask_total: Decimal = yes_asks.iter().map(|(p, s)| p * s).sum();
+    let no_bid_total: Decimal = no_bids.iter().map(|(p, s)| p * s).sum();
+    let no_ask_total: Decimal = no_asks.iter().map(|(p, s)| p * s).sum();
+
+    depth_lines.push(format!(
+        "{:-<20} {:-<20} | {:-<20} {:-<20}",
+        "", "", "", ""
+    ));
+    depth_lines.push(format!(
+        "{:>20} {:>20} | {:>20} {:>20}",
+        format!("${:.2}", yes_bid_total),
+        format!("${:.2}", yes_ask_total),
+        format!("${:.2}", no_bid_total),
+        format!("${:.2}", no_ask_total)
+    ));
+
+    // Log each line
+    for line in depth_lines {
+        info!("[DEPTH] {}", line);
+    }
+}
+
 use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
 use crate::metrics::{CycleMetrics, MarketSummary};
@@ -391,6 +497,24 @@ impl TradeExecutor {
                 (order_id, filled, error)
             })
         };
+
+        // Fetch and log market depth before placing orders
+        match repository::get_latest_orderbook_snapshot(
+            self.db.pool(),
+            opportunity.market_id,
+        )
+        .await
+        {
+            Ok(Some(snapshot)) => {
+                log_market_depth(&snapshot, &opportunity.market_name, 5);
+            }
+            Ok(None) => {
+                warn!("[LIVE] No orderbook snapshot available for market depth visualization");
+            }
+            Err(e) => {
+                warn!("[LIVE] Failed to fetch orderbook for depth visualization: {}", e);
+            }
+        }
 
         // Execute orders based on trade mode
         let (yes_order_id, yes_filled, no_order_id, no_filled): (Option<String>, Decimal, Option<String>, Decimal) =
@@ -1054,6 +1178,24 @@ impl TradeExecutor {
         opportunity: &SpreadOpportunity,
         details: &TradeDetails,
     ) -> Result<()> {
+        // Fetch and log market depth before simulating trade
+        match repository::get_latest_orderbook_snapshot(
+            self.db.pool(),
+            opportunity.market_id,
+        )
+        .await
+        {
+            Ok(Some(snapshot)) => {
+                log_market_depth(&snapshot, &opportunity.market_name, 5);
+            }
+            Ok(None) => {
+                warn!("[DRY RUN] No orderbook snapshot available for market depth visualization");
+            }
+            Err(e) => {
+                warn!("[DRY RUN] Failed to fetch orderbook for depth visualization: {}", e);
+            }
+        }
+
         // Create position in database
         let position_id = repository::create_position(
             self.db.pool(),
