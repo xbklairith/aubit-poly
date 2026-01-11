@@ -114,6 +114,7 @@ async fn scan_markets(gamma: &GammaClient, db: &Database) -> Result<ScanStats> {
                         None, // yes_bids
                         None, // no_asks
                         None, // no_bids
+                        None, // event_timestamp - use DB NOW()
                     )
                     .await
                     {

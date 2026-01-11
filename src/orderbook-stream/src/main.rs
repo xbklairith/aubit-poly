@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use rust_decimal::Decimal;
 use tokio::time::sleep;
@@ -305,6 +306,14 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     }
 }
 
+/// Parse Polymarket timestamp (Unix millis as string) to DateTime<Utc>
+fn parse_event_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    // Polymarket sends Unix timestamp in milliseconds as a string
+    ts.parse::<i64>()
+        .ok()
+        .and_then(|millis| DateTime::from_timestamp_millis(millis))
+}
+
 /// Process a single book message and update orderbook state.
 async fn process_book(
     book: &common::BookMessage,
@@ -319,6 +328,11 @@ async fn process_book(
         let orderbook = orderbooks
             .entry(market_id)
             .or_insert_with(MarketOrderbook::new);
+
+        // Parse and store the event timestamp from Polymarket
+        if let Some(ts) = parse_event_timestamp(&book.timestamp) {
+            orderbook.event_timestamp = Some(ts);
+        }
 
         if is_yes {
             orderbook.yes_asks = book.asks.clone();
@@ -360,6 +374,7 @@ async fn save_snapshot(db: &Database, market_id: Uuid, orderbook: &MarketOrderbo
         Some(yes_bids),
         Some(no_asks),
         Some(no_bids),
+        orderbook.event_timestamp, // Use Polymarket event timestamp
     )
     .await?;
 
@@ -386,6 +401,8 @@ struct MarketOrderbook {
     yes_best_bid: Option<Decimal>,
     no_best_ask: Option<Decimal>,
     no_best_bid: Option<Decimal>,
+    /// Timestamp from Polymarket event (more accurate than DB NOW())
+    event_timestamp: Option<DateTime<Utc>>,
 }
 
 impl MarketOrderbook {

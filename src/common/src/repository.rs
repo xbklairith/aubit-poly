@@ -269,11 +269,12 @@ pub async fn insert_orderbook_snapshot(
     yes_bids: Option<serde_json::Value>,
     no_asks: Option<serde_json::Value>,
     no_bids: Option<serde_json::Value>,
+    event_timestamp: Option<DateTime<Utc>>,
 ) -> Result<i64, sqlx::Error> {
     let result = sqlx::query_scalar!(
         r#"
         INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, yes_asks, yes_bids, no_asks, no_bids, captured_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, NOW()))
         ON CONFLICT (market_id) DO UPDATE SET
             yes_best_ask = EXCLUDED.yes_best_ask,
             yes_best_bid = EXCLUDED.yes_best_bid,
@@ -283,7 +284,7 @@ pub async fn insert_orderbook_snapshot(
             yes_bids = EXCLUDED.yes_bids,
             no_asks = EXCLUDED.no_asks,
             no_bids = EXCLUDED.no_bids,
-            captured_at = NOW()
+            captured_at = COALESCE($10, NOW())
         RETURNING id
         "#,
         market_id,
@@ -295,6 +296,7 @@ pub async fn insert_orderbook_snapshot(
         yes_bids,
         no_asks,
         no_bids,
+        event_timestamp,
     )
     .fetch_one(pool)
     .await?;
