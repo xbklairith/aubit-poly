@@ -541,7 +541,11 @@ impl TradeExecutor {
             Ok(true)
         } else {
             match self.execute_live_trade(opportunity, &details).await? {
-                LiveTradeResult::Executed { invested, yes_filled, no_filled } => {
+                LiveTradeResult::Executed {
+                    invested,
+                    yes_filled,
+                    no_filled,
+                } => {
                     info!(
                         "[TRADE] Successfully executed: invested=${:.2}, YES={}, NO={}",
                         invested, yes_filled, no_filled
@@ -922,10 +926,8 @@ impl TradeExecutor {
                 let no_failed = no_id.is_none();
 
                 if yes_failed && no_failed {
-                    let reason = format!(
-                        "Both orders failed - YES: {:?}, NO: {:?}",
-                        yes_err, no_err
-                    );
+                    let reason =
+                        format!("Both orders failed - YES: {:?}, NO: {:?}", yes_err, no_err);
                     error!("[LIVE] {}", reason);
                     return Ok(LiveTradeResult::Aborted { reason });
                 }
@@ -1274,7 +1276,11 @@ impl TradeExecutor {
                 );
 
                 // Helper closure to execute market sell and record to database
-                let execute_sell = |token_id: &str, amount: Decimal, side: &str| {
+                // imbalance_base is used for fallback retry with 90% on insufficient balance
+                let execute_sell = |token_id: &str,
+                                    amount: Decimal,
+                                    side: &str,
+                                    imbalance_base: Decimal| {
                     let clob = &clob_client;
                     let sig = &signer;
                     let db = &db_clone;
@@ -1282,233 +1288,272 @@ impl TradeExecutor {
                     let token = token_id.to_string();
                     let side_name = side.to_string();
                     async move {
-                        // Floor to 2 decimals to avoid selling more than we hold
-                        let floored_amount = amount.trunc_with_scale(2);
-                        if floored_amount <= Decimal::ZERO {
-                            info!(
-                                "[REBALANCE] {} amount too small after floor: {} -> {}",
-                                side_name.to_uppercase(),
-                                amount,
-                                floored_amount
-                            );
-                            return;
-                        }
-                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(
-                            floored_amount,
-                        ) {
-                            Ok(a) => a,
-                            Err(e) => {
-                                error!(
-                                    "[REBALANCE] {} Amount::shares({}) failed: {:?}",
+                        // Try with initial amount first, then fallback to 90% on insufficient balance
+                        let amounts_to_try = [
+                            amount,                      // First try: requested amount
+                            imbalance_base * dec!(0.90), // Fallback: 90% of imbalance
+                        ];
+
+                        for (amount_idx, try_amount) in amounts_to_try.iter().enumerate() {
+                            // Floor to 2 decimals to avoid selling more than we hold
+                            let floored_amount = try_amount.trunc_with_scale(2);
+                            if floored_amount <= Decimal::ZERO {
+                                info!(
+                                    "[REBALANCE] {} amount too small after floor: {} -> {}",
                                     side_name.to_uppercase(),
-                                    floored_amount,
-                                    e
+                                    try_amount,
+                                    floored_amount
                                 );
                                 return;
                             }
-                        };
+                            let sell_amount =
+                                match polymarket_client_sdk::clob::types::Amount::shares(
+                                    floored_amount,
+                                ) {
+                                    Ok(a) => a,
+                                    Err(e) => {
+                                        error!(
+                                            "[REBALANCE] {} Amount::shares({}) failed: {:?}",
+                                            side_name.to_uppercase(),
+                                            floored_amount,
+                                            e
+                                        );
+                                        return;
+                                    }
+                                };
 
-                        // Retry market sell up to 3 times
-                        const MAX_SELL_RETRIES: u32 = 3;
-                        for attempt in 1..=MAX_SELL_RETRIES {
-                            info!("[REBALANCE] {} sell attempt {}/{}: token={} amount={} type=FOK side=Sell",
-                                side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, &token, floored_amount);
+                            // Retry market sell up to 3 times per amount level
+                            const MAX_SELL_RETRIES: u32 = 3;
+                            let mut insufficient_balance = false;
+                            for attempt in 1..=MAX_SELL_RETRIES {
+                                info!("[REBALANCE] {} sell attempt {}/{} (amount_level={}): token={} amount={} type=FOK side=Sell",
+                                    side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, amount_idx, &token, floored_amount);
 
-                            // Step 1: Build the order
-                            info!(
-                                "[REBALANCE] {} sell: building market order...",
-                                side_name.to_uppercase()
-                            );
-                            let order_result = timeout(
-                                Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob.market_order()
-                                    .token_id(&token)
-                                    .amount(sell_amount.clone())
-                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
-                                    .order_type(OrderType::FOK)
-                                    .build(),
-                            )
-                            .await;
+                                // Step 1: Build the order
+                                info!(
+                                    "[REBALANCE] {} sell: building market order...",
+                                    side_name.to_uppercase()
+                                );
+                                let order_result = timeout(
+                                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                    clob.market_order()
+                                        .token_id(&token)
+                                        .amount(sell_amount.clone())
+                                        .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                        .order_type(OrderType::FOK)
+                                        .build(),
+                                )
+                                .await;
 
-                            let order = match order_result {
-                                Ok(Ok(o)) => {
-                                    info!(
-                                        "[REBALANCE] {} sell: order built successfully",
-                                        side_name.to_uppercase()
-                                    );
-                                    debug!(
-                                        "[REBALANCE] {} sell: order details: {:?}",
-                                        side_name.to_uppercase(),
+                                let order = match order_result {
+                                    Ok(Ok(o)) => {
+                                        info!(
+                                            "[REBALANCE] {} sell: order built successfully",
+                                            side_name.to_uppercase()
+                                        );
+                                        debug!(
+                                            "[REBALANCE] {} sell: order details: {:?}",
+                                            side_name.to_uppercase(),
+                                            o
+                                        );
                                         o
-                                    );
-                                    o
-                                }
-                                Ok(Err(e)) => {
-                                    error!("[REBALANCE] {} sell: failed to build order (attempt {}/{}): {:?}",
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("[REBALANCE] {} sell: failed to build order (attempt {}/{}): {:?}",
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
-                                    if attempt < MAX_SELL_RETRIES {
-                                        let delay = 2u64.pow(attempt);
-                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        if attempt < MAX_SELL_RETRIES {
+                                            let delay = 2u64.pow(attempt);
+                                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                Err(_) => {
-                                    error!("[REBALANCE] {} sell: order build timed out (attempt {}/{})",
+                                    Err(_) => {
+                                        error!("[REBALANCE] {} sell: order build timed out (attempt {}/{})",
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
-                                    if attempt < MAX_SELL_RETRIES {
-                                        let delay = 2u64.pow(attempt);
-                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        if attempt < MAX_SELL_RETRIES {
+                                            let delay = 2u64.pow(attempt);
+                                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                            };
+                                };
 
-                            // Step 2: Sign the order
-                            info!(
-                                "[REBALANCE] {} sell: signing order...",
-                                side_name.to_uppercase()
-                            );
-                            let signed_result = timeout(
-                                Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob.sign(sig, order),
-                            )
-                            .await;
+                                // Step 2: Sign the order
+                                info!(
+                                    "[REBALANCE] {} sell: signing order...",
+                                    side_name.to_uppercase()
+                                );
+                                let signed_result = timeout(
+                                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                    clob.sign(sig, order),
+                                )
+                                .await;
 
-                            let signed = match signed_result {
-                                Ok(Ok(s)) => {
-                                    info!(
-                                        "[REBALANCE] {} sell: order signed successfully",
-                                        side_name.to_uppercase()
-                                    );
-                                    debug!(
-                                        "[REBALANCE] {} sell: signed order: {:?}",
-                                        side_name.to_uppercase(),
+                                let signed = match signed_result {
+                                    Ok(Ok(s)) => {
+                                        info!(
+                                            "[REBALANCE] {} sell: order signed successfully",
+                                            side_name.to_uppercase()
+                                        );
+                                        debug!(
+                                            "[REBALANCE] {} sell: signed order: {:?}",
+                                            side_name.to_uppercase(),
+                                            s
+                                        );
                                         s
-                                    );
-                                    s
-                                }
-                                Ok(Err(e)) => {
-                                    error!("[REBALANCE] {} sell: failed to sign order (attempt {}/{}): {:?}",
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("[REBALANCE] {} sell: failed to sign order (attempt {}/{}): {:?}",
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
-                                    if attempt < MAX_SELL_RETRIES {
-                                        let delay = 2u64.pow(attempt);
-                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        if attempt < MAX_SELL_RETRIES {
+                                            let delay = 2u64.pow(attempt);
+                                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                Err(_) => {
-                                    error!("[REBALANCE] {} sell: order signing timed out (attempt {}/{})",
+                                    Err(_) => {
+                                        error!("[REBALANCE] {} sell: order signing timed out (attempt {}/{})",
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
-                                    if attempt < MAX_SELL_RETRIES {
-                                        let delay = 2u64.pow(attempt);
-                                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        if attempt < MAX_SELL_RETRIES {
+                                            let delay = 2u64.pow(attempt);
+                                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                            };
+                                };
 
-                            // Step 3: Post the order
-                            info!(
-                                "[REBALANCE] {} sell: posting order to CLOB...",
-                                side_name.to_uppercase()
-                            );
-                            let post_result = timeout(
-                                Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob.post_order(signed),
-                            )
-                            .await;
+                                // Step 3: Post the order
+                                info!(
+                                    "[REBALANCE] {} sell: posting order to CLOB...",
+                                    side_name.to_uppercase()
+                                );
+                                let post_result = timeout(
+                                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                    clob.post_order(signed),
+                                )
+                                .await;
 
-                            match post_result {
-                                Ok(Ok(r)) => {
-                                    info!(
+                                match post_result {
+                                    Ok(Ok(r)) => {
+                                        info!(
                                         "[REBALANCE] {} sell: received response with {} order(s)",
                                         side_name.to_uppercase(),
                                         r.len()
                                     );
-                                    debug!(
-                                        "[REBALANCE] {} sell: full response: {:?}",
-                                        side_name.to_uppercase(),
-                                        r
-                                    );
+                                        debug!(
+                                            "[REBALANCE] {} sell: full response: {:?}",
+                                            side_name.to_uppercase(),
+                                            r
+                                        );
 
-                                    if let Some(order) = r.first() {
-                                        let order_id = &order.order_id;
-                                        let filled = order.taking_amount;
-                                        let has_error = order
-                                            .error_msg
-                                            .as_ref()
-                                            .map(|e| !e.is_empty())
-                                            .unwrap_or(false);
+                                        if let Some(order) = r.first() {
+                                            let order_id = &order.order_id;
+                                            let filled = order.taking_amount;
+                                            let has_error = order
+                                                .error_msg
+                                                .as_ref()
+                                                .map(|e| !e.is_empty())
+                                                .unwrap_or(false);
 
-                                        info!("[REBALANCE] {} sell result: order_id={} filled={} success={} status={:?} error={:?}",
+                                            info!("[REBALANCE] {} sell result: order_id={} filled={} success={} status={:?} error={:?}",
                                             side_name.to_uppercase(), order_id, filled, order.success, order.status, order.error_msg);
 
-                                        // Log additional fields if available
-                                        info!("[REBALANCE] {} sell details: making_amount={} taking_amount={} tx_hashes={:?}",
+                                            // Log additional fields if available
+                                            info!("[REBALANCE] {} sell details: making_amount={} taking_amount={} tx_hashes={:?}",
                                             side_name.to_uppercase(), order.making_amount, order.taking_amount, order.transaction_hashes);
 
-                                        // Check if order actually succeeded
-                                        if !order.success || has_error || order_id.is_empty() {
-                                            warn!("[REBALANCE] {} sell order failed (attempt {}/{}): success={} error={:?}",
+                                            // Check if order actually succeeded
+                                            if !order.success || has_error || order_id.is_empty() {
+                                                // Check for insufficient balance error
+                                                let error_str = order
+                                                    .error_msg
+                                                    .as_ref()
+                                                    .map(|s| s.to_lowercase())
+                                                    .unwrap_or_default();
+                                                if error_str.contains("balance")
+                                                    || error_str.contains("allowance")
+                                                    || error_str.contains("insufficient")
+                                                {
+                                                    warn!("[REBALANCE] {} sell INSUFFICIENT BALANCE detected, will try 90% fallback: error={:?}",
+                                                    side_name.to_uppercase(), order.error_msg);
+                                                    insufficient_balance = true;
+                                                    break; // Break inner retry loop to try reduced amount
+                                                }
+                                                warn!("[REBALANCE] {} sell order failed (attempt {}/{}): success={} error={:?}",
                                                 side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, order.success, order.error_msg);
-                                        } else {
-                                            // Order succeeded, record it
-                                            info!("[REBALANCE] {} sell SUCCESS: filled {} of {} shares", side_name.to_uppercase(), filled, floored_amount);
-                                            if let Err(e) = repository::record_trade_with_order(
-                                                db.pool(),
-                                                pos_id,
-                                                &side_name,
-                                                "sell",
-                                                Decimal::ZERO,
-                                                filled,
-                                                Some(order_id),
-                                                floored_amount,
-                                                if filled >= floored_amount {
-                                                    "filled"
-                                                } else {
-                                                    "partial"
-                                                },
-                                            )
-                                            .await
-                                            {
-                                                error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                            } else {
+                                                // Order succeeded, record it
+                                                info!("[REBALANCE] {} sell SUCCESS: filled {} of {} shares", side_name.to_uppercase(), filled, floored_amount);
+                                                if let Err(e) = repository::record_trade_with_order(
+                                                    db.pool(),
+                                                    pos_id,
+                                                    &side_name,
+                                                    "sell",
+                                                    Decimal::ZERO,
+                                                    filled,
+                                                    Some(order_id),
+                                                    floored_amount,
+                                                    if filled >= floored_amount {
+                                                        "filled"
+                                                    } else {
+                                                        "partial"
+                                                    },
+                                                )
+                                                .await
+                                                {
+                                                    error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
+                                                }
+                                                return; // Success, exit retry loop
                                             }
-                                            return; // Success, exit retry loop
+                                        } else {
+                                            warn!("[REBALANCE] {} sell: empty response array (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                         }
-                                    } else {
-                                        warn!("[REBALANCE] {} sell: empty response array (attempt {}/{})", side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
                                     }
-                                }
-                                Ok(Err(e)) => {
-                                    error!("[REBALANCE] {} sell: post_order failed (attempt {}/{}): {:?}",
+                                    Ok(Err(e)) => {
+                                        error!("[REBALANCE] {} sell: post_order failed (attempt {}/{}): {:?}",
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
-                                }
-                                Err(_) => {
-                                    error!(
+                                    }
+                                    Err(_) => {
+                                        error!(
                                         "[REBALANCE] {} sell: post_order timed out (attempt {}/{})",
                                         side_name.to_uppercase(),
                                         attempt,
                                         MAX_SELL_RETRIES
                                     );
+                                    }
                                 }
+
+                                // Exponential backoff before retry (2s, 4s, 8s)
+                                if attempt < MAX_SELL_RETRIES {
+                                    let delay = 2u64.pow(attempt);
+                                    info!(
+                                        "[REBALANCE] {} sell: waiting {}s before retry...",
+                                        side_name.to_uppercase(),
+                                        delay
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                                }
+                            } // end inner retry loop
+
+                            // If insufficient balance, try next amount level (90%)
+                            if insufficient_balance && amount_idx == 0 {
+                                warn!(
+                                    "[REBALANCE] {} sell: trying 90% fallback amount ({} -> {})",
+                                    side_name.to_uppercase(),
+                                    floored_amount,
+                                    (imbalance_base * dec!(0.90)).trunc_with_scale(2)
+                                );
+                                continue; // Continue to next amount level
                             }
 
-                            // Exponential backoff before retry (2s, 4s, 8s)
-                            if attempt < MAX_SELL_RETRIES {
-                                let delay = 2u64.pow(attempt);
-                                info!(
-                                    "[REBALANCE] {} sell: waiting {}s before retry...",
-                                    side_name.to_uppercase(),
-                                    delay
-                                );
-                                tokio::time::sleep(Duration::from_secs(delay)).await;
-                            }
-                        }
-                        error!(
-                            "[REBALANCE] {} sell failed after {} attempts",
-                            side_name.to_uppercase(),
-                            MAX_SELL_RETRIES
-                        );
+                            // If we get here without success, log and continue
+                            error!(
+                                "[REBALANCE] {} sell failed at amount_level={} after {} attempts",
+                                side_name.to_uppercase(),
+                                amount_idx,
+                                MAX_SELL_RETRIES
+                            );
+                        } // end amounts_to_try loop
                     }
                 };
 
@@ -1538,14 +1583,17 @@ impl TradeExecutor {
 
                     let safe_sell_amount = calculate_safe_sell_amount(imbalance, actual_balance);
                     if safe_sell_amount <= Decimal::ZERO {
-                        warn!("[REBALANCE] No YES tokens available to sell (balance: {}, imbalance: {})",
-                            actual_balance, imbalance);
+                        // Balance=0 from API, use imbalance*98% as fallback (2% safety margin)
+                        let fallback_amount = imbalance * dec!(0.98);
+                        warn!("[REBALANCE] Balance=0 from API, using fallback: {} (imbalance={} * 98%)",
+                            fallback_amount, imbalance);
+                        execute_sell(&yes_token_id, fallback_amount, "yes", imbalance).await;
                     } else {
                         info!(
                             "[REBALANCE] Selling {} excess YES shares (balance: {}, imbalance: {})",
                             safe_sell_amount, actual_balance, imbalance
                         );
-                        execute_sell(&yes_token_id, safe_sell_amount, "yes").await;
+                        execute_sell(&yes_token_id, safe_sell_amount, "yes", imbalance).await;
                     }
                 } else if imbalance < Decimal::ZERO {
                     let excess_no = -imbalance;
@@ -1559,14 +1607,17 @@ impl TradeExecutor {
 
                     let safe_sell_amount = calculate_safe_sell_amount(excess_no, actual_balance);
                     if safe_sell_amount <= Decimal::ZERO {
-                        warn!("[REBALANCE] No NO tokens available to sell (balance: {}, imbalance: {})",
-                            actual_balance, excess_no);
+                        // Balance=0 from API, use imbalance*98% as fallback (2% safety margin)
+                        let fallback_amount = excess_no * dec!(0.98);
+                        warn!("[REBALANCE] Balance=0 from API, using fallback: {} (imbalance={} * 98%)",
+                            fallback_amount, excess_no);
+                        execute_sell(&no_token_id, fallback_amount, "no", excess_no).await;
                     } else {
                         info!(
                             "[REBALANCE] Selling {} excess NO shares (balance: {}, imbalance: {})",
                             safe_sell_amount, actual_balance, excess_no
                         );
-                        execute_sell(&no_token_id, safe_sell_amount, "no").await;
+                        execute_sell(&no_token_id, safe_sell_amount, "no", excess_no).await;
                     }
                 } else {
                     info!("[REBALANCE] Position balanced, no action needed");
