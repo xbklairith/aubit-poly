@@ -7,7 +7,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use std::str::FromStr;
 use tracing::{debug, warn};
 
 /// Position data from Gamma Data API.
@@ -16,11 +15,11 @@ use tracing::{debug, warn};
 pub struct PositionData {
     /// Token ID (the "asset" field from API)
     pub asset: String,
-    /// Amount held (as string, needs parsing)
-    pub size: String,
+    /// Amount held (API returns float)
+    pub size: f64,
     /// Average price paid
     #[serde(default)]
-    pub avg_price: Option<String>,
+    pub avg_price: Option<f64>,
 }
 
 /// Trait for checking token balances.
@@ -99,15 +98,14 @@ pub fn calculate_safe_sell_amount(imbalance: Decimal, actual_balance: Decimal) -
 }
 
 /// Find balance for a specific token from positions list.
-/// Logs a warning if the size cannot be parsed.
 pub fn find_balance(positions: &[PositionData], token_id: &str) -> Decimal {
     positions
         .iter()
         .find(|p| p.asset == token_id)
         .map(|p| {
-            Decimal::from_str(&p.size).unwrap_or_else(|e| {
+            Decimal::try_from(p.size).unwrap_or_else(|e| {
                 warn!(
-                    "[BALANCE] Failed to parse size '{}' for asset {}: {:?}",
+                    "[BALANCE] Failed to convert size {} for asset {}: {:?}",
                     p.size,
                     &p.asset[..20.min(p.asset.len())],
                     e
@@ -127,23 +125,23 @@ mod tests {
 
     #[test]
     fn test_parse_positions_response() {
-        let json = r#"[{"asset":"12345","size":"10.5","avgPrice":"0.62"}]"#;
+        let json = r#"[{"asset":"12345","size":10.5,"avgPrice":0.62}]"#;
         let positions: Vec<PositionData> = serde_json::from_str(json).unwrap();
 
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].asset, "12345");
-        assert_eq!(positions[0].size, "10.5");
-        assert_eq!(positions[0].avg_price, Some("0.62".to_string()));
+        assert_eq!(positions[0].size, 10.5);
+        assert_eq!(positions[0].avg_price, Some(0.62));
     }
 
     #[test]
     fn test_parse_positions_response_without_avg_price() {
-        let json = r#"[{"asset":"12345","size":"10.5"}]"#;
+        let json = r#"[{"asset":"12345","size":10.5}]"#;
         let positions: Vec<PositionData> = serde_json::from_str(json).unwrap();
 
         assert_eq!(positions.len(), 1);
         assert_eq!(positions[0].asset, "12345");
-        assert_eq!(positions[0].size, "10.5");
+        assert_eq!(positions[0].size, 10.5);
         assert_eq!(positions[0].avg_price, None);
     }
 
@@ -225,12 +223,12 @@ mod tests {
             Ok(vec![
                 PositionData {
                     asset: "token1".to_string(),
-                    size: "10.5".to_string(),
-                    avg_price: Some("0.62".to_string()),
+                    size: 10.5,
+                    avg_price: Some(0.62),
                 },
                 PositionData {
                     asset: "token2".to_string(),
-                    size: "5.0".to_string(),
+                    size: 5.0,
                     avg_price: None,
                 },
             ])
@@ -247,12 +245,12 @@ mod tests {
         let positions = vec![
             PositionData {
                 asset: "token1".to_string(),
-                size: "10.5".to_string(),
+                size: 10.5,
                 avg_price: None,
             },
             PositionData {
                 asset: "token2".to_string(),
-                size: "5.25".to_string(),
+                size: 5.25,
                 avg_price: None,
             },
         ];
@@ -265,7 +263,7 @@ mod tests {
     fn test_find_balance_returns_zero_for_unknown_token() {
         let positions = vec![PositionData {
             asset: "token1".to_string(),
-            size: "10.5".to_string(),
+            size: 10.5,
             avg_price: None,
         }];
 
@@ -276,17 +274,5 @@ mod tests {
     fn test_find_balance_returns_zero_for_empty_positions() {
         let positions: Vec<PositionData> = vec![];
         assert_eq!(find_balance(&positions, "any_token"), dec!(0));
-    }
-
-    #[test]
-    fn test_find_balance_handles_invalid_size() {
-        let positions = vec![PositionData {
-            asset: "token1".to_string(),
-            size: "invalid".to_string(),
-            avg_price: None,
-        }];
-
-        // Should return 0 and log warning (can't assert log in unit test)
-        assert_eq!(find_balance(&positions, "token1"), dec!(0));
     }
 }
