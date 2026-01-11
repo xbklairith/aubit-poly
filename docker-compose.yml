@@ -12,7 +12,7 @@ services:
     command: >
       --dry-run=false
       --verbose-timing
-      --assets BTC,ETH,SOL,XRP,UNKNOWN
+      --assets ALL
       --max-time-to-expiry 5184000
       --max-orderbook-age 30
       --min-profit 0.02
