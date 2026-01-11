@@ -368,7 +368,7 @@ pub async fn get_market_by_condition_id(
     Ok(market)
 }
 
-/// Get markets with fresh orderbook prices using optimized LATERAL JOIN.
+/// Get markets with fresh orderbook prices using DISTINCT ON.
 /// Only returns markets with orderbook data captured within max_age_seconds.
 pub async fn get_markets_with_fresh_orderbooks(
     pool: &PgPool,
@@ -376,8 +376,13 @@ pub async fn get_markets_with_fresh_orderbooks(
     assets: &[String],
     max_expiry_seconds: i64,
 ) -> Result<Vec<MarketWithPrices>, sqlx::Error> {
-    // Build the query - SQLx doesn't support dynamic IN clauses well,
-    // so we use ANY with an array
+    // Pre-compute timestamps in Rust to avoid make_interval() in SQL
+    let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
+    let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+
+    // Use DISTINCT ON instead of LATERAL JOIN for better performance
+    // LATERAL executes a subquery per market row (N queries)
+    // DISTINCT ON scans orderbook_snapshots once and deduplicates (1 query)
     let results = sqlx::query_as!(
         MarketWithPrices,
         r#"
@@ -398,23 +403,22 @@ pub async fn get_markets_with_fresh_orderbooks(
             o.no_best_bid,
             o.captured_at as "captured_at!"
         FROM markets m
-        INNER JOIN LATERAL (
-            SELECT yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
+        INNER JOIN (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
             FROM orderbook_snapshots
-            WHERE market_id = m.id
-              AND captured_at > NOW() - make_interval(secs => $1::double precision)
-            ORDER BY captured_at DESC
-            LIMIT 1
-        ) o ON true
+            WHERE captured_at > $1
+            ORDER BY market_id, captured_at DESC
+        ) o ON o.market_id = m.id
         WHERE m.is_active = true
           AND m.asset = ANY($2)
           AND m.end_time > NOW()
-          AND m.end_time <= NOW() + make_interval(secs => $3::double precision)
+          AND m.end_time <= $3
         ORDER BY m.end_time ASC
         "#,
-        max_age_seconds as f64,
+        snapshot_cutoff,
         assets,
-        max_expiry_seconds as f64,
+        expiry_cutoff,
     )
     .fetch_all(pool)
     .await?;

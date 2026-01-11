@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN LATERAL (\n            SELECT yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at\n            FROM orderbook_snapshots\n            WHERE market_id = m.id\n              AND captured_at > NOW() - make_interval(secs => $1::double precision)\n            ORDER BY captured_at DESC\n            LIMIT 1\n        ) o ON true\n        WHERE m.is_active = true\n          AND m.asset = ANY($2)\n          AND m.end_time > NOW()\n          AND m.end_time <= NOW() + make_interval(secs => $3::double precision)\n        ORDER BY m.end_time ASC\n        ",
+  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at\n            FROM orderbook_snapshots\n            WHERE captured_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.asset = ANY($2)\n          AND m.end_time > NOW()\n          AND m.end_time <= $3\n        ORDER BY m.end_time ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -81,9 +81,9 @@
     ],
     "parameters": {
       "Left": [
-        "Float8",
+        "Timestamptz",
         "TextArray",
-        "Float8"
+        "Timestamptz"
       ]
     },
     "nullable": [
@@ -104,5 +104,5 @@
       true
     ]
   },
-  "hash": "6a5938f9af48aa4fe15b8154202e5b8ba0cc8f0d8bef1c6264fa4b85e2d849c2"
+  "hash": "f77c12e79c4af8bbe3f987fff87fa8e8f3ff61c0360299581de2525195197f1f"
 }
