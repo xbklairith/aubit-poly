@@ -32,3 +32,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 mockall.workspace = true
+serial_test = "3.2"

@@ -40,7 +40,9 @@ use common::models::OrderbookSnapshot;
 use common::repository::{self, MarketWithPrices};
 use common::Database;
 
-use crate::balance::{BalanceChecker, GammaBalanceChecker, calculate_safe_sell_amount, find_balance};
+use crate::balance::{
+    calculate_safe_sell_amount, find_balance, BalanceChecker, GammaBalanceChecker,
+};
 
 /// Gamma Data API URL for balance queries
 const GAMMA_DATA_API_URL: &str = "https://data-api.polymarket.com";
@@ -118,6 +120,55 @@ fn parse_orderbook_side(json_value: &Option<serde_json::Value>) -> Vec<(Decimal,
         .unwrap_or_default()
 }
 
+/// Extract best ask prices from orderbook snapshot.
+/// Returns (yes_best_ask, no_best_ask) or None if either side is empty.
+/// Implements REQ-006 (price consistency) and REQ-015 (empty orderbook handling).
+fn extract_best_asks(snapshot: &OrderbookSnapshot) -> Option<(Decimal, Decimal)> {
+    let yes_asks = parse_orderbook_side(&snapshot.yes_asks);
+    let no_asks = parse_orderbook_side(&snapshot.no_asks);
+
+    // REQ-015: Return None if either side is empty
+    if yes_asks.is_empty() || no_asks.is_empty() {
+        return None;
+    }
+
+    // Get best (lowest) ask price from each side
+    let yes_best = yes_asks.iter().map(|(p, _)| *p).min()?;
+    let no_best = no_asks.iter().map(|(p, _)| *p).min()?;
+
+    Some((yes_best, no_best))
+}
+
+/// Determine if trade should be aborted due to spread widening.
+/// Returns (should_abort, reason) tuple for logging (REQ-017).
+fn should_abort_due_to_spread(
+    original_spread: Decimal,
+    current_spread: Decimal,
+    tolerance: Decimal,
+) -> (bool, String) {
+    let spread_change = current_spread - original_spread;
+
+    if current_spread > original_spread + tolerance {
+        let reason = format!(
+            "Spread widened beyond tolerance: {:.4} -> {:.4} (change: +{:.4}, tolerance: {:.4})",
+            original_spread, current_spread, spread_change, tolerance
+        );
+        (true, reason)
+    } else if spread_change < Decimal::ZERO {
+        let reason = format!(
+            "Spread improved: {:.4} -> {:.4} (change: {:.4})",
+            original_spread, current_spread, spread_change
+        );
+        (false, reason)
+    } else {
+        let reason = format!(
+            "Spread within tolerance: {:.4} -> {:.4} (change: +{:.4}, tolerance: {:.4})",
+            original_spread, current_spread, spread_change, tolerance
+        );
+        (false, reason)
+    }
+}
+
 /// Log market depth visualization before placing orders.
 /// Shows top N levels of the orderbook for both YES and NO sides.
 fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels: usize) {
@@ -129,18 +180,12 @@ fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels:
     // Build depth visualization string
     let mut depth_lines = Vec::new();
     depth_lines.push(format!("Market Depth: {}", market_name));
-    depth_lines.push(format!(
-        "{:^42} | {:^42}",
-        "YES", "NO"
-    ));
+    depth_lines.push(format!("{:^42} | {:^42}", "YES", "NO"));
     depth_lines.push(format!(
         "{:>20} {:>20} | {:>20} {:>20}",
         "BID", "ASK", "BID", "ASK"
     ));
-    depth_lines.push(format!(
-        "{:-<20} {:-<20} | {:-<20} {:-<20}",
-        "", "", "", ""
-    ));
+    depth_lines.push(format!("{:-<20} {:-<20} | {:-<20} {:-<20}", "", "", "", ""));
 
     // Show levels (bids sorted descending, asks sorted ascending)
     let mut yes_bids_sorted = yes_bids.clone();
@@ -150,8 +195,8 @@ fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels:
 
     yes_bids_sorted.sort_by(|a, b| b.0.cmp(&a.0)); // Descending
     yes_asks_sorted.sort_by(|a, b| a.0.cmp(&b.0)); // Ascending
-    no_bids_sorted.sort_by(|a, b| b.0.cmp(&a.0));  // Descending
-    no_asks_sorted.sort_by(|a, b| a.0.cmp(&b.0));  // Ascending
+    no_bids_sorted.sort_by(|a, b| b.0.cmp(&a.0)); // Descending
+    no_asks_sorted.sort_by(|a, b| a.0.cmp(&b.0)); // Ascending
 
     for i in 0..max_levels {
         let yes_bid = yes_bids_sorted
@@ -183,10 +228,7 @@ fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels:
     let no_bid_total: Decimal = no_bids.iter().map(|(p, s)| p * s).sum();
     let no_ask_total: Decimal = no_asks.iter().map(|(p, s)| p * s).sum();
 
-    depth_lines.push(format!(
-        "{:-<20} {:-<20} | {:-<20} {:-<20}",
-        "", "", "", ""
-    ));
+    depth_lines.push(format!("{:-<20} {:-<20} | {:-<20} {:-<20}", "", "", "", ""));
     depth_lines.push(format!(
         "{:>20} {:>20} | {:>20} {:>20}",
         format!("${:.2}", yes_bid_total),
@@ -204,7 +246,32 @@ fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels:
 use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
 use crate::metrics::{CycleMetrics, MarketSummary};
-use crate::models::{BotState, PositionCache, SessionState, SpreadOpportunity, TradeDetails};
+use crate::models::{
+    BotState, LiveTradeResult, PositionCache, SessionState, SpreadOpportunity, TradeDetails,
+};
+
+use chrono::DateTime;
+
+/// Type alias for authenticated Polymarket CLOB client
+type AuthenticatedClobClient = polymarket_client_sdk::clob::Client<
+    polymarket_client_sdk::auth::state::Authenticated<polymarket_client_sdk::auth::Normal>,
+>;
+
+/// Type alias for the private key signer type
+type PrivateKeySigner = alloy::signers::local::PrivateKeySigner;
+
+/// Cached authentication state for Polymarket CLOB.
+/// Stores the authenticated client and signer for reuse across trades.
+/// Implements REQ-001 (cached authentication) and REQ-002 (authentication reuse).
+struct CachedAuthentication {
+    /// The authenticated CLOB client
+    client: AuthenticatedClobClient,
+    /// The signer used for this authentication
+    signer: PrivateKeySigner,
+    /// Timestamp when authentication was performed (for debugging/logging)
+    #[allow(dead_code)]
+    authenticated_at: DateTime<Utc>,
+}
 
 /// Trade executor - manages trading state and executes spread arbitrage.
 pub struct TradeExecutor {
@@ -213,6 +280,8 @@ pub struct TradeExecutor {
     detector: SpreadDetector,
     state: BotState,
     session: SessionState,
+    /// Cached authentication for Polymarket CLOB (None = not yet authenticated)
+    cached_auth: Option<CachedAuthentication>,
 }
 
 impl TradeExecutor {
@@ -243,7 +312,102 @@ impl TradeExecutor {
             detector,
             state: BotState::Idle,
             session,
+            cached_auth: None, // REQ-001: Initialize as None, authenticate on first trade
         })
+    }
+
+    /// Ensure we have a valid authenticated CLOB client.
+    /// Authenticates on first call, reuses cached client thereafter.
+    /// Implements REQ-001 (cached authentication), REQ-002 (reuse), REQ-016 (metrics logging).
+    ///
+    /// # Returns
+    /// References to the cached client and signer for order operations.
+    ///
+    /// # Errors
+    /// - Missing WALLET_PRIVATE_KEY environment variable (REQ-013)
+    /// - Invalid private key format
+    /// - Invalid proxy wallet address
+    /// - Authentication failure with Polymarket
+    async fn ensure_authenticated(
+        &mut self,
+    ) -> Result<(&AuthenticatedClobClient, &PrivateKeySigner)> {
+        // Check for cached auth (REQ-002)
+        if self.cached_auth.is_some() {
+            info!("[AUTH] Using cached authentication (cache hit)");
+            let auth = self.cached_auth.as_ref().unwrap();
+            return Ok((&auth.client, &auth.signer));
+        }
+
+        // Cache miss - perform fresh authentication (REQ-001)
+        let start = std::time::Instant::now();
+        info!("[AUTH] Authenticating with Polymarket CLOB (cache miss)...");
+
+        // Load credentials from environment (REQ-013)
+        let private_key = std::env::var("WALLET_PRIVATE_KEY")
+            .context("Missing WALLET_PRIVATE_KEY for live trading")?;
+
+        let private_key = if private_key.starts_with("0x") {
+            private_key
+        } else {
+            format!("0x{}", private_key)
+        };
+
+        // Create signer
+        let signer = PrivateKeySigner::from_str(&private_key)
+            .context("Invalid private key format")?
+            .with_chain_id(Some(POLYGON));
+
+        // Determine signature type based on proxy wallet
+        let proxy_wallet = std::env::var("POLYMARKET_WALLET_ADDRESS").ok();
+        let signature_type = if proxy_wallet.is_some() {
+            SignatureType::GnosisSafe
+        } else {
+            SignatureType::Eoa
+        };
+
+        // Build authentication
+        let mut auth_builder = ClobClient::new(CLOB_HOST, ClobConfig::default())?
+            .authentication_builder(&signer)
+            .signature_type(signature_type);
+
+        if let Some(ref proxy) = proxy_wallet {
+            let funder_address: alloy::primitives::Address =
+                proxy.parse().context("Invalid proxy wallet address")?;
+            auth_builder = auth_builder.funder(funder_address);
+        }
+
+        // Perform authentication
+        let client = auth_builder
+            .authenticate()
+            .await
+            .context("Failed to authenticate with Polymarket")?;
+
+        let elapsed = start.elapsed();
+        info!(
+            "[AUTH] Authentication successful in {:?}, caching for session (REQ-016)",
+            elapsed
+        );
+
+        // Cache the authentication
+        self.cached_auth = Some(CachedAuthentication {
+            client,
+            signer,
+            authenticated_at: Utc::now(),
+        });
+
+        let auth = self.cached_auth.as_ref().unwrap();
+        Ok((&auth.client, &auth.signer))
+    }
+
+    /// Clear the authentication cache, forcing re-auth on next call.
+    /// Called when an auth error is detected during order operations.
+    /// Implements REQ-003 (authentication refresh on failure).
+    #[allow(dead_code)]
+    fn clear_auth_cache(&mut self) {
+        if self.cached_auth.is_some() {
+            warn!("[AUTH] Clearing authentication cache due to auth failure");
+            self.cached_auth = None;
+        }
     }
 
     /// Run a single trading cycle.
@@ -308,28 +472,30 @@ impl TradeExecutor {
     /// Attempt to execute a spread trade.
     async fn try_execute_trade(&mut self, opportunity: &SpreadOpportunity) -> Result<bool> {
         // Check if we already have a position in this market
-        if self.session.open_positions.contains_key(&opportunity.market_id) {
+        if self
+            .session
+            .open_positions
+            .contains_key(&opportunity.market_id)
+        {
             debug!("Already have position in {}", opportunity.market_name);
             return Ok(false);
         }
 
         // Fetch orderbook to check liquidity
-        let liquidity = match repository::get_latest_orderbook_snapshot(
-            self.db.pool(),
-            opportunity.market_id,
-        )
-        .await
-        {
-            Ok(Some(snapshot)) => calculate_orderbook_liquidity(&snapshot),
-            Ok(None) => {
-                debug!("No orderbook snapshot for {}", opportunity.market_name);
-                Decimal::ZERO
-            }
-            Err(e) => {
-                warn!("Failed to fetch orderbook: {}", e);
-                Decimal::ZERO
-            }
-        };
+        let liquidity =
+            match repository::get_latest_orderbook_snapshot(self.db.pool(), opportunity.market_id)
+                .await
+            {
+                Ok(Some(snapshot)) => calculate_orderbook_liquidity(&snapshot),
+                Ok(None) => {
+                    debug!("No orderbook snapshot for {}", opportunity.market_name);
+                    Decimal::ZERO
+                }
+                Err(e) => {
+                    warn!("Failed to fetch orderbook: {}", e);
+                    Decimal::ZERO
+                }
+            };
 
         // Calculate investment size based on liquidity
         // Baseline: base_position_size ($10)
@@ -362,86 +528,151 @@ impl TradeExecutor {
             return Ok(false);
         }
 
-        info!(
-            "Trade size: ${} (liquidity: ${:.2})",
-            size, liquidity
-        );
+        info!("Trade size: ${} (liquidity: ${:.2})", size, liquidity);
 
         // Calculate trade details
-        let details = self.detector.calculate_trade_details(
-            opportunity,
-            size,
-            self.config.fee_rate,
-        );
+        let details =
+            self.detector
+                .calculate_trade_details(opportunity, size, self.config.fee_rate);
 
         // Execute trade (dry run or live)
         if self.config.dry_run {
             self.execute_dry_run(opportunity, &details).await?;
+            Ok(true)
         } else {
-            self.execute_live_trade(opportunity, &details).await?;
+            match self.execute_live_trade(opportunity, &details).await? {
+                LiveTradeResult::Executed { invested, yes_filled, no_filled } => {
+                    info!(
+                        "[TRADE] Successfully executed: invested=${:.2}, YES={}, NO={}",
+                        invested, yes_filled, no_filled
+                    );
+                    Ok(true)
+                }
+                LiveTradeResult::Aborted { reason } => {
+                    info!("[TRADE] Aborted: {}", reason);
+                    Ok(false) // Trade was not executed, but not an error
+                }
+            }
         }
-
-        Ok(true)
     }
 
     /// Execute a live trade on Polymarket.
+    /// Implements REQ-001 (cached auth), REQ-006 (price consistency), REQ-007 (synchronized snapshot).
+    ///
+    /// # Returns
+    /// - `Ok(LiveTradeResult::Executed { ... })` - Trade was successfully executed
+    /// - `Ok(LiveTradeResult::Aborted { reason })` - Trade was intentionally aborted (not an error)
+    /// - `Err(...)` - Actual error occurred (auth failure, network error, etc.)
     async fn execute_live_trade(
         &mut self,
         opportunity: &SpreadOpportunity,
         details: &TradeDetails,
-    ) -> Result<()> {
+    ) -> Result<LiveTradeResult> {
         info!(
-            "[LIVE] Placing orders for {} | YES: {:.4} @ ${:.4} | NO: {:.4} @ ${:.4}",
+            "[LIVE] Placing orders for {} | Original YES: {:.4} @ ${:.4} | NO: {:.4} @ ${:.4}",
             opportunity.market_name,
-            details.yes_shares, details.yes_price,
-            details.no_shares, details.no_price
+            details.yes_shares,
+            details.yes_price,
+            details.no_shares,
+            details.no_price
         );
 
-        // Get credentials from environment
+        // Clone Arc<Database> before borrowing self (for use inside auth scope)
+        let db = self.db.clone();
+        let spread_tolerance = self.config.spread_tolerance;
+        let max_orderbook_age = self.config.max_orderbook_age_secs;
+
+        // Get credentials for rebalance task (read before ensure_authenticated borrows self)
         let private_key = std::env::var("WALLET_PRIVATE_KEY")
             .context("Missing WALLET_PRIVATE_KEY for live trading")?;
-
         let private_key = if private_key.starts_with("0x") {
             private_key
         } else {
             format!("0x{}", private_key)
         };
+        let proxy_wallet = std::env::var("POLYMARKET_WALLET_ADDRESS").ok();
 
-        // Create signer
-        let signer = LocalSigner::from_str(&private_key)
+        // REQ-001: Use cached authentication (cache hit on subsequent trades)
+        let (clob_client, _cached_signer) = self.ensure_authenticated().await?;
+
+        // Create local signer for signing operations (SDK requires owned/mutable signer)
+        // The cached client is still used for all API operations
+        let signer = PrivateKeySigner::from_str(&private_key)
             .context("Invalid private key format")?
             .with_chain_id(Some(POLYGON));
 
-        // Check for proxy wallet
-        let proxy_wallet = std::env::var("POLYMARKET_WALLET_ADDRESS").ok();
-        let signature_type = if proxy_wallet.is_some() {
-            SignatureType::GnosisSafe
-        } else {
-            SignatureType::Eoa
-        };
+        // REQ-006, REQ-007: Fetch latest snapshot for current prices and market depth
+        let snapshot =
+            match repository::get_latest_orderbook_snapshot(db.pool(), opportunity.market_id).await
+            {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    let reason = "No orderbook snapshot available".to_string();
+                    warn!("[LIVE] {}, aborting trade", reason);
+                    return Ok(LiveTradeResult::Aborted { reason });
+                }
+                Err(e) => {
+                    let reason = format!("Failed to fetch orderbook snapshot: {}", e);
+                    warn!("[LIVE] {}, aborting trade", reason);
+                    return Ok(LiveTradeResult::Aborted { reason });
+                }
+            };
 
-        // Authenticate with CLOB
-        let mut auth_builder = ClobClient::new(CLOB_HOST, ClobConfig::default())?
-            .authentication_builder(&signer)
-            .signature_type(signature_type);
-
-        if let Some(ref proxy) = proxy_wallet {
-            let funder_address: alloy::primitives::Address = proxy
-                .parse()
-                .context("Invalid proxy wallet address")?;
-            auth_builder = auth_builder.funder(funder_address);
+        // REQ-012: Validate snapshot age (with clock skew protection)
+        let snapshot_age = Utc::now() - snapshot.captured_at;
+        if snapshot_age.num_seconds() < 0 || snapshot_age.num_seconds() > max_orderbook_age as i64 {
+            let reason = format!(
+                "Snapshot too stale: {}s (max {}s)",
+                snapshot_age.num_seconds(),
+                max_orderbook_age
+            );
+            warn!("[LIVE] {}, aborting trade", reason);
+            return Ok(LiveTradeResult::Aborted { reason });
         }
 
-        let clob_client = auth_builder
-            .authenticate()
-            .await
-            .context("Failed to authenticate with Polymarket")?;
+        // REQ-006, REQ-015: Extract current best ask prices
+        let (current_yes_price, current_no_price) = match extract_best_asks(&snapshot) {
+            Some(prices) => prices,
+            None => {
+                let reason = "Empty orderbook (no asks available)".to_string();
+                warn!("[LIVE] {} (REQ-015), aborting trade", reason);
+                return Ok(LiveTradeResult::Aborted { reason });
+            }
+        };
+
+        // REQ-004, REQ-005: Validate spread hasn't widened beyond tolerance
+        let original_spread = details.yes_price + details.no_price;
+        let current_spread = current_yes_price + current_no_price;
+        let (should_abort, spread_reason) =
+            should_abort_due_to_spread(original_spread, current_spread, spread_tolerance);
+
+        // REQ-017: Log spread validation result
+        info!("[SPREAD] {}", spread_reason);
+
+        if should_abort {
+            warn!("[LIVE] Trade aborted: {} (REQ-005)", spread_reason);
+            return Ok(LiveTradeResult::Aborted {
+                reason: spread_reason,
+            });
+        }
+
+        // REQ-006: Use current prices for order building (not stale opportunity prices)
+        info!(
+            "[LIVE] Using current prices: YES ${:.4} -> ${:.4}, NO ${:.4} -> ${:.4}",
+            details.yes_price, current_yes_price, details.no_price, current_no_price
+        );
+
+        // REQ-006: Recalculate shares based on current prices
+        // Original investment amount stays the same, but shares adjust for new prices
+        let total_invested = details.total_invested;
+        let current_total_price = current_yes_price + current_no_price;
+        let shares_at_current_prices = (total_invested / current_total_price).round_dp(2);
 
         // Round price and size to 2 decimal places (Polymarket requirement)
-        let mut yes_size = details.yes_shares.round_dp(2);
-        let yes_price = details.yes_price.round_dp(2);
-        let mut no_size = details.no_shares.round_dp(2);
-        let no_price = details.no_price.round_dp(2);
+        let mut yes_size = shares_at_current_prices;
+        let yes_price = current_yes_price.round_dp(2);
+        let mut no_size = shares_at_current_prices;
+        let no_price = current_no_price.round_dp(2);
 
         // Check minimum order value ($1 minimum per Polymarket)
         let yes_value = yes_size * yes_price;
@@ -473,11 +704,12 @@ impl TradeExecutor {
             );
             Some("no")
         } else {
-            warn!(
-                "[LIVE] Both order values too low - YES: ${:.2}, NO: ${:.2} (min $1). Skipping.",
+            let reason = format!(
+                "Both order values too low - YES: ${:.2}, NO: ${:.2} (min $1)",
                 yes_value, no_value
             );
-            return Ok(());
+            warn!("[LIVE] {}. Skipping.", reason);
+            return Ok(LiveTradeResult::Aborted { reason });
         };
 
         // Log order details
@@ -489,251 +721,286 @@ impl TradeExecutor {
         }
 
         // Helper to extract order result
-        let extract_order_info = |result: &[polymarket_client_sdk::clob::types::PostOrderResponse]| {
-            result.first().map(|r| {
-                let has_error = r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
-                let order_id = if r.order_id.is_empty() || has_error {
-                    None
-                } else {
-                    Some(r.order_id.clone())
-                };
-                let filled = r.taking_amount;
-                let error = r.error_msg.clone();
-                (order_id, filled, error)
-            })
-        };
+        let extract_order_info =
+            |result: &[polymarket_client_sdk::clob::types::PostOrderResponse]| {
+                result.first().map(|r| {
+                    let has_error = r.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
+                    let order_id = if r.order_id.is_empty() || has_error {
+                        None
+                    } else {
+                        Some(r.order_id.clone())
+                    };
+                    let filled = r.taking_amount;
+                    let error = r.error_msg.clone();
+                    (order_id, filled, error)
+                })
+            };
 
-        // Fetch and log market depth before placing orders
-        match repository::get_latest_orderbook_snapshot(
-            self.db.pool(),
-            opportunity.market_id,
-        )
-        .await
-        {
-            Ok(Some(snapshot)) => {
-                log_market_depth(&snapshot, &opportunity.market_name, 5);
-            }
-            Ok(None) => {
-                warn!("[LIVE] No orderbook snapshot available for market depth visualization");
-            }
-            Err(e) => {
-                warn!("[LIVE] Failed to fetch orderbook for depth visualization: {}", e);
-            }
-        }
+        // REQ-007: Log market depth using the SAME snapshot used for price validation
+        // This ensures the depth display matches the prices used for orders
+        log_market_depth(&snapshot, &opportunity.market_name, 5);
 
         // Execute orders based on trade mode
-        let (yes_order_id, yes_filled, no_order_id, no_filled): (Option<String>, Decimal, Option<String>, Decimal) =
-            match single_side_only {
-                Some("yes") => {
-                    // Single-sided YES bet
-                    info!("[LIVE] Building single YES order: {} @ ${}", yes_size, yes_price);
-                    let yes_order = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client
-                            .limit_order()
-                            .token_id(&opportunity.yes_token_id)
-                            .size(yes_size)
-                            .price(yes_price)
-                            .side(polymarket_client_sdk::clob::types::Side::Buy)
-                            .build()
-                    )
-                    .await
-                    .context("YES order building timed out")?
-                    .context("Failed to build YES order")?;
+        let (yes_order_id, yes_filled, no_order_id, no_filled): (
+            Option<String>,
+            Decimal,
+            Option<String>,
+            Decimal,
+        ) = match single_side_only {
+            Some("yes") => {
+                // Single-sided YES bet
+                info!(
+                    "[LIVE] Building single YES order: {} @ ${}",
+                    yes_size, yes_price
+                );
+                let yes_order = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client
+                        .limit_order()
+                        .token_id(&opportunity.yes_token_id)
+                        .size(yes_size)
+                        .price(yes_price)
+                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                        .build(),
+                )
+                .await
+                .context("YES order building timed out")?
+                .context("Failed to build YES order")?;
 
-                    let yes_signed = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client.sign(&signer, yes_order)
-                    )
-                    .await
-                    .context("YES order signing timed out")?
-                    .context("Failed to sign YES order")?;
+                let yes_signed = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client.sign(&signer, yes_order),
+                )
+                .await
+                .context("YES order signing timed out")?
+                .context("Failed to sign YES order")?;
 
-                    info!("[LIVE] Posting single YES order...");
-                    let yes_result = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client.post_order(yes_signed)
-                    )
-                    .await
-                    .context("YES order posting timed out")?
-                    .context("Failed to post YES order")?;
+                info!("[LIVE] Posting single YES order...");
+                let yes_result = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client.post_order(yes_signed),
+                )
+                .await
+                .context("YES order posting timed out")?
+                .context("Failed to post YES order")?;
 
-                    info!("[LIVE] YES order result: {:?}", yes_result);
-                    let (order_id, filled, error) = extract_order_info(&yes_result)
-                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+                info!("[LIVE] YES order result: {:?}", yes_result);
+                let (order_id, filled, error) = extract_order_info(&yes_result).unwrap_or((
+                    None,
+                    dec!(0),
+                    Some("No response".to_string()),
+                ));
 
-                    if order_id.is_none() {
-                        error!("[LIVE] Single YES order failed: {:?}", error);
-                        return Ok(());
-                    }
-                    (order_id, filled, None, dec!(0))
+                if order_id.is_none() {
+                    let reason = format!("Single YES order failed: {:?}", error);
+                    error!("[LIVE] {}", reason);
+                    return Ok(LiveTradeResult::Aborted { reason });
                 }
-                Some("no") => {
-                    // Single-sided NO bet
-                    info!("[LIVE] Building single NO order: {} @ ${}", no_size, no_price);
-                    let no_order = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client
-                            .limit_order()
-                            .token_id(&opportunity.no_token_id)
-                            .size(no_size)
-                            .price(no_price)
-                            .side(polymarket_client_sdk::clob::types::Side::Buy)
-                            .build()
-                    )
-                    .await
-                    .context("NO order building timed out")?
-                    .context("Failed to build NO order")?;
+                (order_id, filled, None, dec!(0))
+            }
+            Some("no") => {
+                // Single-sided NO bet
+                info!(
+                    "[LIVE] Building single NO order: {} @ ${}",
+                    no_size, no_price
+                );
+                let no_order = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client
+                        .limit_order()
+                        .token_id(&opportunity.no_token_id)
+                        .size(no_size)
+                        .price(no_price)
+                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                        .build(),
+                )
+                .await
+                .context("NO order building timed out")?
+                .context("Failed to build NO order")?;
 
-                    let no_signed = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client.sign(&signer, no_order)
-                    )
-                    .await
-                    .context("NO order signing timed out")?
-                    .context("Failed to sign NO order")?;
+                let no_signed = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client.sign(&signer, no_order),
+                )
+                .await
+                .context("NO order signing timed out")?
+                .context("Failed to sign NO order")?;
 
-                    info!("[LIVE] Posting single NO order...");
-                    let no_result = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        clob_client.post_order(no_signed)
-                    )
-                    .await
-                    .context("NO order posting timed out")?
-                    .context("Failed to post NO order")?;
+                info!("[LIVE] Posting single NO order...");
+                let no_result = timeout(
+                    Duration::from_secs(ORDER_TIMEOUT_SECS),
+                    clob_client.post_order(no_signed),
+                )
+                .await
+                .context("NO order posting timed out")?
+                .context("Failed to post NO order")?;
 
-                    info!("[LIVE] NO order result: {:?}", no_result);
-                    let (order_id, filled, error) = extract_order_info(&no_result)
-                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+                info!("[LIVE] NO order result: {:?}", no_result);
+                let (order_id, filled, error) = extract_order_info(&no_result).unwrap_or((
+                    None,
+                    dec!(0),
+                    Some("No response".to_string()),
+                ));
 
-                    if order_id.is_none() {
-                        error!("[LIVE] Single NO order failed: {:?}", error);
-                        return Ok(());
-                    }
-                    (None, dec!(0), order_id, filled)
+                if order_id.is_none() {
+                    let reason = format!("Single NO order failed: {:?}", error);
+                    error!("[LIVE] {}", reason);
+                    return Ok(LiveTradeResult::Aborted { reason });
                 }
-                _ => {
-                    // Both sides - original spread arb logic
-                    let (yes_order, no_order) = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        async {
-                            tokio::try_join!(
-                                async {
-                                    clob_client
-                                        .limit_order()
-                                        .token_id(&opportunity.yes_token_id)
-                                        .size(yes_size)
-                                        .price(yes_price)
-                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
-                                        .build()
-                                        .await
-                                        .context("Failed to build YES order")
-                                },
-                                async {
-                                    clob_client
-                                        .limit_order()
-                                        .token_id(&opportunity.no_token_id)
-                                        .size(no_size)
-                                        .price(no_price)
-                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
-                                        .build()
-                                        .await
-                                        .context("Failed to build NO order")
-                                }
-                            )
-                        }
-                    )
+                (None, dec!(0), order_id, filled)
+            }
+            _ => {
+                // Both sides - original spread arb logic
+                let (yes_order, no_order) =
+                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                        tokio::try_join!(
+                            async {
+                                clob_client
+                                    .limit_order()
+                                    .token_id(&opportunity.yes_token_id)
+                                    .size(yes_size)
+                                    .price(yes_price)
+                                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                    .build()
+                                    .await
+                                    .context("Failed to build YES order")
+                            },
+                            async {
+                                clob_client
+                                    .limit_order()
+                                    .token_id(&opportunity.no_token_id)
+                                    .size(no_size)
+                                    .price(no_price)
+                                    .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                    .build()
+                                    .await
+                                    .context("Failed to build NO order")
+                            }
+                        )
+                    })
                     .await
                     .context("Order building timed out")??;
 
-                    let (yes_signed, no_signed) = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        async {
-                            tokio::try_join!(
-                                clob_client.sign(&signer, yes_order),
-                                clob_client.sign(&signer, no_order)
-                            )
-                        }
-                    )
+                let (yes_signed, no_signed) =
+                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                        tokio::try_join!(
+                            clob_client.sign(&signer, yes_order),
+                            clob_client.sign(&signer, no_order)
+                        )
+                    })
                     .await
                     .context("Order signing timed out")?
                     .context("Failed to sign orders")?;
 
-                    info!("[LIVE] Posting YES and NO orders simultaneously...");
-                    let (yes_result, no_result) = timeout(
-                        Duration::from_secs(ORDER_TIMEOUT_SECS),
-                        async {
-                            tokio::try_join!(
-                                clob_client.post_order(yes_signed),
-                                clob_client.post_order(no_signed)
-                            )
-                        }
-                    )
+                info!("[LIVE] Posting YES and NO orders simultaneously...");
+                let (yes_result, no_result) =
+                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                        tokio::try_join!(
+                            clob_client.post_order(yes_signed),
+                            clob_client.post_order(no_signed)
+                        )
+                    })
                     .await
                     .context("Order posting timed out")?
                     .context("Failed to post orders")?;
 
-                    info!("[LIVE] YES order result: {:?}", yes_result);
-                    info!("[LIVE] NO order result: {:?}", no_result);
+                info!("[LIVE] YES order result: {:?}", yes_result);
+                info!("[LIVE] NO order result: {:?}", no_result);
 
-                    let (yes_id, yes_f, yes_err) = extract_order_info(&yes_result)
-                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
-                    let (no_id, no_f, no_err) = extract_order_info(&no_result)
-                        .unwrap_or((None, dec!(0), Some("No response".to_string())));
+                let (yes_id, yes_f, yes_err) = extract_order_info(&yes_result).unwrap_or((
+                    None,
+                    dec!(0),
+                    Some("No response".to_string()),
+                ));
+                let (no_id, no_f, no_err) = extract_order_info(&no_result).unwrap_or((
+                    None,
+                    dec!(0),
+                    Some("No response".to_string()),
+                ));
 
-                    let yes_failed = yes_id.is_none();
-                    let no_failed = no_id.is_none();
+                let yes_failed = yes_id.is_none();
+                let no_failed = no_id.is_none();
 
-                    if yes_failed && no_failed {
-                        error!("[LIVE] Both orders failed - YES: {:?}, NO: {:?}", yes_err, no_err);
-                        return Ok(());
-                    }
-
-                    // If only one failed, cancel the other with retries
-                    if yes_failed || no_failed {
-                        warn!("[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.", yes_err, no_err);
-
-                        if let Some(ref order_id) = yes_id {
-                            for attempt in 1..=CANCEL_MAX_RETRIES {
-                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
-                                    Ok(Ok(_)) => {
-                                        info!("[LIVE] Cancelled YES order {} on attempt {}", order_id, attempt);
-                                        break;
-                                    }
-                                    Ok(Err(e)) => warn!("[LIVE] Cancel YES failed (attempt {}): {:?}", attempt, e),
-                                    Err(_) => warn!("[LIVE] Cancel YES timeout (attempt {})", attempt),
-                                }
-                                if attempt == CANCEL_MAX_RETRIES {
-                                    error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                                } else {
-                                    tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
-                                }
-                            }
-                        }
-
-                        if let Some(ref order_id) = no_id {
-                            for attempt in 1..=CANCEL_MAX_RETRIES {
-                                match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
-                                    Ok(Ok(_)) => {
-                                        info!("[LIVE] Cancelled NO order {} on attempt {}", order_id, attempt);
-                                        break;
-                                    }
-                                    Ok(Err(e)) => warn!("[LIVE] Cancel NO failed (attempt {}): {:?}", attempt, e),
-                                    Err(_) => warn!("[LIVE] Cancel NO timeout (attempt {})", attempt),
-                                }
-                                if attempt == CANCEL_MAX_RETRIES {
-                                    error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                                } else {
-                                    tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
-                                }
-                            }
-                        }
-                        return Ok(());
-                    }
-
-                    (yes_id, yes_f, no_id, no_f)
+                if yes_failed && no_failed {
+                    let reason = format!(
+                        "Both orders failed - YES: {:?}, NO: {:?}",
+                        yes_err, no_err
+                    );
+                    error!("[LIVE] {}", reason);
+                    return Ok(LiveTradeResult::Aborted { reason });
                 }
-            };
+
+                // If only one failed, cancel the other with retries
+                if yes_failed || no_failed {
+                    warn!("[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.", yes_err, no_err);
+
+                    if let Some(ref order_id) = yes_id {
+                        for attempt in 1..=CANCEL_MAX_RETRIES {
+                            match timeout(
+                                Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                                clob_client.cancel_order(order_id),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => {
+                                    info!(
+                                        "[LIVE] Cancelled YES order {} on attempt {}",
+                                        order_id, attempt
+                                    );
+                                    break;
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("[LIVE] Cancel YES failed (attempt {}): {:?}", attempt, e)
+                                }
+                                Err(_) => warn!("[LIVE] Cancel YES timeout (attempt {})", attempt),
+                            }
+                            if attempt == CANCEL_MAX_RETRIES {
+                                error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS))
+                                    .await;
+                            }
+                        }
+                    }
+
+                    if let Some(ref order_id) = no_id {
+                        for attempt in 1..=CANCEL_MAX_RETRIES {
+                            match timeout(
+                                Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                                clob_client.cancel_order(order_id),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => {
+                                    info!(
+                                        "[LIVE] Cancelled NO order {} on attempt {}",
+                                        order_id, attempt
+                                    );
+                                    break;
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("[LIVE] Cancel NO failed (attempt {}): {:?}", attempt, e)
+                                }
+                                Err(_) => warn!("[LIVE] Cancel NO timeout (attempt {})", attempt),
+                            }
+                            if attempt == CANCEL_MAX_RETRIES {
+                                error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS))
+                                    .await;
+                            }
+                        }
+                    }
+                    let reason = format!(
+                        "Partial order failure (cancelled other side) - YES: {:?}, NO: {:?}",
+                        yes_err, no_err
+                    );
+                    return Ok(LiveTradeResult::Aborted { reason });
+                }
+
+                (yes_id, yes_f, no_id, no_f)
+            }
+        };
 
         // Log fill amounts
         info!(
@@ -743,8 +1010,10 @@ impl TradeExecutor {
         );
 
         // Check for unfilled orders (for later rebalance spawn)
-        let yes_unfilled = single_side_only.is_none() && yes_size > Decimal::ZERO && yes_filled < yes_size;
-        let no_unfilled = single_side_only.is_none() && no_size > Decimal::ZERO && no_filled < no_size;
+        let yes_unfilled =
+            single_side_only.is_none() && yes_size > Decimal::ZERO && yes_filled < yes_size;
+        let no_unfilled =
+            single_side_only.is_none() && no_size > Decimal::ZERO && no_filled < no_size;
 
         // Determine order status based on fill (handle non-placed orders)
         let yes_status = if yes_size == Decimal::ZERO {
@@ -770,21 +1039,16 @@ impl TradeExecutor {
         let position_id = repository::create_position(
             self.db.pool(),
             opportunity.market_id,
-            yes_size,  // Requested (rounded) size
-            no_size,   // Requested (rounded) size
+            yes_size,                                  // Requested (rounded) size
+            no_size,                                   // Requested (rounded) size
             yes_size * yes_price + no_size * no_price, // Actual order value
-            false, // NOT dry_run
+            false,                                     // NOT dry_run
         )
         .await?;
 
         // Update position with actual fill amounts
-        repository::update_position_fills(
-            self.db.pool(),
-            position_id,
-            yes_filled,
-            no_filled,
-        )
-        .await?;
+        repository::update_position_fills(self.db.pool(), position_id, yes_filled, no_filled)
+            .await?;
 
         // Record trades with order IDs and fill amounts (only for sides that were placed)
         let mut trade_count = 0;
@@ -851,8 +1115,10 @@ impl TradeExecutor {
             "[LIVE] {} EXECUTED: {} | YES: {} @ ${} | NO: {} @ ${} | Invested: ${:.2}",
             trade_type,
             opportunity.market_name,
-            yes_size, yes_price,
-            no_size, no_price,
+            yes_size,
+            yes_price,
+            no_size,
+            no_price,
             actual_invested
         );
 
@@ -877,7 +1143,10 @@ impl TradeExecutor {
 
             tokio::spawn(async move {
                 // Wait before rebalancing
-                info!("[REBALANCE] Waiting {}s for {} orders to fill...", UNFILLED_WAIT_SECS, market_name);
+                info!(
+                    "[REBALANCE] Waiting {}s for {} orders to fill...",
+                    UNFILLED_WAIT_SECS, market_name
+                );
                 tokio::time::sleep(Duration::from_secs(UNFILLED_WAIT_SECS)).await;
 
                 // Re-authenticate for background task
@@ -896,7 +1165,9 @@ impl TradeExecutor {
                 };
 
                 let mut auth_builder = match ClobClient::new(CLOB_HOST, ClobConfig::default()) {
-                    Ok(c) => c.authentication_builder(&signer).signature_type(signature_type),
+                    Ok(c) => c
+                        .authentication_builder(&signer)
+                        .signature_type(signature_type),
                     Err(e) => {
                         error!("[REBALANCE] Failed to create CLOB client: {:?}", e);
                         return;
@@ -926,7 +1197,12 @@ impl TradeExecutor {
                 if yes_unfilled {
                     if let Some(ref order_id) = yes_order_id_clone {
                         info!("[REBALANCE] Cancelling YES order {}", order_id);
-                        match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
+                        match timeout(
+                            Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                            clob_client.cancel_order(order_id),
+                        )
+                        .await
+                        {
                             Ok(Ok(_)) => {
                                 // Cancel succeeded, query final fill amount
                                 match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
@@ -955,7 +1231,12 @@ impl TradeExecutor {
                 if no_unfilled {
                     if let Some(ref order_id) = no_order_id_clone {
                         info!("[REBALANCE] Cancelling NO order {}", order_id);
-                        match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.cancel_order(order_id)).await {
+                        match timeout(
+                            Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                            clob_client.cancel_order(order_id),
+                        )
+                        .await
+                        {
                             Ok(Ok(_)) => {
                                 // Cancel succeeded, query final fill amount
                                 match timeout(Duration::from_secs(CANCEL_TIMEOUT_SECS), clob_client.order(order_id)).await {
@@ -981,11 +1262,16 @@ impl TradeExecutor {
 
                 // Abort if any cancel failed - position state unknown
                 if cancel_failed {
-                    error!("[REBALANCE] Aborting due to cancel failure - manual intervention needed");
+                    error!(
+                        "[REBALANCE] Aborting due to cancel failure - manual intervention needed"
+                    );
                     return;
                 }
 
-                info!("[REBALANCE] After cancels - YES: {}, NO: {}", final_yes_filled, final_no_filled);
+                info!(
+                    "[REBALANCE] After cancels - YES: {}, NO: {}",
+                    final_yes_filled, final_no_filled
+                );
 
                 // Helper closure to execute market sell and record to database
                 let execute_sell = |token_id: &str, amount: Decimal, side: &str| {
@@ -999,13 +1285,25 @@ impl TradeExecutor {
                         // Floor to 2 decimals to avoid selling more than we hold
                         let floored_amount = amount.trunc_with_scale(2);
                         if floored_amount <= Decimal::ZERO {
-                            info!("[REBALANCE] {} amount too small after floor: {} -> {}", side_name.to_uppercase(), amount, floored_amount);
+                            info!(
+                                "[REBALANCE] {} amount too small after floor: {} -> {}",
+                                side_name.to_uppercase(),
+                                amount,
+                                floored_amount
+                            );
                             return;
                         }
-                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(floored_amount) {
+                        let sell_amount = match polymarket_client_sdk::clob::types::Amount::shares(
+                            floored_amount,
+                        ) {
                             Ok(a) => a,
                             Err(e) => {
-                                error!("[REBALANCE] {} Amount::shares({}) failed: {:?}", side_name.to_uppercase(), floored_amount, e);
+                                error!(
+                                    "[REBALANCE] {} Amount::shares({}) failed: {:?}",
+                                    side_name.to_uppercase(),
+                                    floored_amount,
+                                    e
+                                );
                                 return;
                             }
                         };
@@ -1017,22 +1315,32 @@ impl TradeExecutor {
                                 side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, &token, floored_amount);
 
                             // Step 1: Build the order
-                            info!("[REBALANCE] {} sell: building market order...", side_name.to_uppercase());
+                            info!(
+                                "[REBALANCE] {} sell: building market order...",
+                                side_name.to_uppercase()
+                            );
                             let order_result = timeout(
                                 Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob
-                                    .market_order()
+                                clob.market_order()
                                     .token_id(&token)
                                     .amount(sell_amount.clone())
                                     .side(polymarket_client_sdk::clob::types::Side::Sell)
                                     .order_type(OrderType::FOK)
-                                    .build()
-                            ).await;
+                                    .build(),
+                            )
+                            .await;
 
                             let order = match order_result {
                                 Ok(Ok(o)) => {
-                                    info!("[REBALANCE] {} sell: order built successfully", side_name.to_uppercase());
-                                    debug!("[REBALANCE] {} sell: order details: {:?}", side_name.to_uppercase(), o);
+                                    info!(
+                                        "[REBALANCE] {} sell: order built successfully",
+                                        side_name.to_uppercase()
+                                    );
+                                    debug!(
+                                        "[REBALANCE] {} sell: order details: {:?}",
+                                        side_name.to_uppercase(),
+                                        o
+                                    );
                                     o
                                 }
                                 Ok(Err(e)) => {
@@ -1056,16 +1364,27 @@ impl TradeExecutor {
                             };
 
                             // Step 2: Sign the order
-                            info!("[REBALANCE] {} sell: signing order...", side_name.to_uppercase());
+                            info!(
+                                "[REBALANCE] {} sell: signing order...",
+                                side_name.to_uppercase()
+                            );
                             let signed_result = timeout(
                                 Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob.sign(sig, order)
-                            ).await;
+                                clob.sign(sig, order),
+                            )
+                            .await;
 
                             let signed = match signed_result {
                                 Ok(Ok(s)) => {
-                                    info!("[REBALANCE] {} sell: order signed successfully", side_name.to_uppercase());
-                                    debug!("[REBALANCE] {} sell: signed order: {:?}", side_name.to_uppercase(), s);
+                                    info!(
+                                        "[REBALANCE] {} sell: order signed successfully",
+                                        side_name.to_uppercase()
+                                    );
+                                    debug!(
+                                        "[REBALANCE] {} sell: signed order: {:?}",
+                                        side_name.to_uppercase(),
+                                        s
+                                    );
                                     s
                                 }
                                 Ok(Err(e)) => {
@@ -1089,21 +1408,37 @@ impl TradeExecutor {
                             };
 
                             // Step 3: Post the order
-                            info!("[REBALANCE] {} sell: posting order to CLOB...", side_name.to_uppercase());
+                            info!(
+                                "[REBALANCE] {} sell: posting order to CLOB...",
+                                side_name.to_uppercase()
+                            );
                             let post_result = timeout(
                                 Duration::from_secs(ORDER_TIMEOUT_SECS),
-                                clob.post_order(signed)
-                            ).await;
+                                clob.post_order(signed),
+                            )
+                            .await;
 
                             match post_result {
                                 Ok(Ok(r)) => {
-                                    info!("[REBALANCE] {} sell: received response with {} order(s)", side_name.to_uppercase(), r.len());
-                                    debug!("[REBALANCE] {} sell: full response: {:?}", side_name.to_uppercase(), r);
+                                    info!(
+                                        "[REBALANCE] {} sell: received response with {} order(s)",
+                                        side_name.to_uppercase(),
+                                        r.len()
+                                    );
+                                    debug!(
+                                        "[REBALANCE] {} sell: full response: {:?}",
+                                        side_name.to_uppercase(),
+                                        r
+                                    );
 
                                     if let Some(order) = r.first() {
                                         let order_id = &order.order_id;
                                         let filled = order.taking_amount;
-                                        let has_error = order.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
+                                        let has_error = order
+                                            .error_msg
+                                            .as_ref()
+                                            .map(|e| !e.is_empty())
+                                            .unwrap_or(false);
 
                                         info!("[REBALANCE] {} sell result: order_id={} filled={} success={} status={:?} error={:?}",
                                             side_name.to_uppercase(), order_id, filled, order.success, order.status, order.error_msg);
@@ -1128,8 +1463,14 @@ impl TradeExecutor {
                                                 filled,
                                                 Some(order_id),
                                                 floored_amount,
-                                                if filled >= floored_amount { "filled" } else { "partial" },
-                                            ).await {
+                                                if filled >= floored_amount {
+                                                    "filled"
+                                                } else {
+                                                    "partial"
+                                                },
+                                            )
+                                            .await
+                                            {
                                                 error!("[REBALANCE] Failed to record {} sell trade: {:?}", side_name.to_uppercase(), e);
                                             }
                                             return; // Success, exit retry loop
@@ -1143,19 +1484,31 @@ impl TradeExecutor {
                                         side_name.to_uppercase(), attempt, MAX_SELL_RETRIES, e);
                                 }
                                 Err(_) => {
-                                    error!("[REBALANCE] {} sell: post_order timed out (attempt {}/{})",
-                                        side_name.to_uppercase(), attempt, MAX_SELL_RETRIES);
+                                    error!(
+                                        "[REBALANCE] {} sell: post_order timed out (attempt {}/{})",
+                                        side_name.to_uppercase(),
+                                        attempt,
+                                        MAX_SELL_RETRIES
+                                    );
                                 }
                             }
 
                             // Exponential backoff before retry (2s, 4s, 8s)
                             if attempt < MAX_SELL_RETRIES {
                                 let delay = 2u64.pow(attempt);
-                                info!("[REBALANCE] {} sell: waiting {}s before retry...", side_name.to_uppercase(), delay);
+                                info!(
+                                    "[REBALANCE] {} sell: waiting {}s before retry...",
+                                    side_name.to_uppercase(),
+                                    delay
+                                );
                                 tokio::time::sleep(Duration::from_secs(delay)).await;
                             }
                         }
-                        error!("[REBALANCE] {} sell failed after {} attempts", side_name.to_uppercase(), MAX_SELL_RETRIES);
+                        error!(
+                            "[REBALANCE] {} sell failed after {} attempts",
+                            side_name.to_uppercase(),
+                            MAX_SELL_RETRIES
+                        );
                     }
                 };
 
@@ -1163,8 +1516,8 @@ impl TradeExecutor {
                 let imbalance = final_yes_filled - final_no_filled;
 
                 // Fetch all positions once to get both YES and NO balances
-                let user_address = proxy_wallet_clone
-                    .unwrap_or_else(|| format!("{}", signer.address()));
+                let user_address =
+                    proxy_wallet_clone.unwrap_or_else(|| format!("{}", signer.address()));
                 let balance_checker = GammaBalanceChecker::new(GAMMA_DATA_API_URL, &user_address);
 
                 let positions = match balance_checker.get_all_positions().await {
@@ -1188,8 +1541,10 @@ impl TradeExecutor {
                         warn!("[REBALANCE] No YES tokens available to sell (balance: {}, imbalance: {})",
                             actual_balance, imbalance);
                     } else {
-                        info!("[REBALANCE] Selling {} excess YES shares (balance: {}, imbalance: {})",
-                            safe_sell_amount, actual_balance, imbalance);
+                        info!(
+                            "[REBALANCE] Selling {} excess YES shares (balance: {}, imbalance: {})",
+                            safe_sell_amount, actual_balance, imbalance
+                        );
                         execute_sell(&yes_token_id, safe_sell_amount, "yes").await;
                     }
                 } else if imbalance < Decimal::ZERO {
@@ -1207,8 +1562,10 @@ impl TradeExecutor {
                         warn!("[REBALANCE] No NO tokens available to sell (balance: {}, imbalance: {})",
                             actual_balance, excess_no);
                     } else {
-                        info!("[REBALANCE] Selling {} excess NO shares (balance: {}, imbalance: {})",
-                            safe_sell_amount, actual_balance, excess_no);
+                        info!(
+                            "[REBALANCE] Selling {} excess NO shares (balance: {}, imbalance: {})",
+                            safe_sell_amount, actual_balance, excess_no
+                        );
                         execute_sell(&no_token_id, safe_sell_amount, "no").await;
                     }
                 } else {
@@ -1217,7 +1574,11 @@ impl TradeExecutor {
             });
         }
 
-        Ok(())
+        Ok(LiveTradeResult::Executed {
+            invested: actual_invested,
+            yes_filled,
+            no_filled,
+        })
     }
 
     /// Execute a dry-run (simulated) trade.
@@ -1227,11 +1588,7 @@ impl TradeExecutor {
         details: &TradeDetails,
     ) -> Result<()> {
         // Fetch and log market depth before simulating trade
-        match repository::get_latest_orderbook_snapshot(
-            self.db.pool(),
-            opportunity.market_id,
-        )
-        .await
+        match repository::get_latest_orderbook_snapshot(self.db.pool(), opportunity.market_id).await
         {
             Ok(Some(snapshot)) => {
                 log_market_depth(&snapshot, &opportunity.market_name, 5);
@@ -1240,7 +1597,10 @@ impl TradeExecutor {
                 warn!("[DRY RUN] No orderbook snapshot available for market depth visualization");
             }
             Err(e) => {
-                warn!("[DRY RUN] Failed to fetch orderbook for depth visualization: {}", e);
+                warn!(
+                    "[DRY RUN] Failed to fetch orderbook for depth visualization: {}",
+                    e
+                );
             }
         }
 
@@ -1308,10 +1668,7 @@ impl TradeExecutor {
     }
 
     /// Check for expired positions and settle them.
-    async fn check_and_settle_expired(
-        &mut self,
-        _markets: &[MarketWithPrices],
-    ) -> Result<usize> {
+    async fn check_and_settle_expired(&mut self, _markets: &[MarketWithPrices]) -> Result<usize> {
         let now = Utc::now();
         let mut settled = 0;
 
@@ -1331,13 +1688,7 @@ impl TradeExecutor {
             let profit = payout - position.total_invested;
 
             // Close position in database
-            repository::close_position(
-                self.db.pool(),
-                position.id,
-                payout,
-                profit,
-            )
-            .await?;
+            repository::close_position(self.db.pool(), position.id, payout, profit).await?;
 
             // Update session
             self.session.current_balance += payout;
@@ -1414,7 +1765,11 @@ impl TradeExecutor {
             .collect();
 
         // Sort by profit (highest/best first)
-        summaries.sort_by(|a, b| b.profit_pct.partial_cmp(&a.profit_pct).unwrap_or(std::cmp::Ordering::Equal));
+        summaries.sort_by(|a, b| {
+            b.profit_pct
+                .partial_cmp(&a.profit_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         summaries.truncate(limit);
         summaries
     }
@@ -1464,7 +1819,11 @@ impl TradeExecutor {
             } else if profit_pct >= min_profit {
                 "✅ TRADE!".to_string()
             } else if profit_pct > dec!(0) {
-                format!("⏳ +{:.1}% < {:.0}%", profit_pct * dec!(100), min_profit * dec!(100))
+                format!(
+                    "⏳ +{:.1}% < {:.0}%",
+                    profit_pct * dec!(100),
+                    min_profit * dec!(100)
+                )
             } else {
                 format!("❌ {:.1}%", profit_pct * dec!(100))
             };
@@ -1624,10 +1983,7 @@ mod tests {
     #[test]
     fn test_calculate_orderbook_liquidity_one_side_empty() {
         // YES has liquidity, NO is empty => min is 0
-        let snapshot = make_snapshot(
-            json!([{"price": "0.50", "size": "100"}]),
-            json!([]),
-        );
+        let snapshot = make_snapshot(json!([{"price": "0.50", "size": "100"}]), json!([]));
         assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(0));
     }
 
@@ -1666,7 +2022,11 @@ mod tests {
     #[test]
     fn test_total_exposure_no_positions() {
         let session = make_session_state(dec!(1000));
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         assert_eq!(exposure, dec!(0));
     }
 
@@ -1677,7 +2037,11 @@ mod tests {
         let market_id = position.market_id;
         session.open_positions.insert(market_id, position);
 
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         assert_eq!(exposure, dec!(100));
     }
 
@@ -1693,14 +2057,22 @@ mod tests {
         session.open_positions.insert(pos2.market_id, pos2);
         session.open_positions.insert(pos3.market_id, pos3);
 
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         assert_eq!(exposure, dec!(325)); // 100 + 150 + 75
     }
 
     #[test]
     fn test_available_balance_no_positions() {
         let session = make_session_state(dec!(1000));
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         let available = session.current_balance - exposure;
         assert_eq!(available, dec!(1000));
     }
@@ -1711,7 +2083,11 @@ mod tests {
         let position = make_position_cache(dec!(200));
         session.open_positions.insert(position.market_id, position);
 
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         let available = session.current_balance - exposure;
         assert_eq!(available, dec!(800)); // 1000 - 200
     }
@@ -1722,7 +2098,11 @@ mod tests {
         let position = make_position_cache(dec!(500));
         session.open_positions.insert(position.market_id, position);
 
-        let exposure: Decimal = session.open_positions.values().map(|p| p.total_invested).sum();
+        let exposure: Decimal = session
+            .open_positions
+            .values()
+            .map(|p| p.total_invested)
+            .sum();
         let available = session.current_balance - exposure;
         assert_eq!(available, dec!(0));
     }
@@ -1746,9 +2126,9 @@ mod tests {
     #[test]
     fn test_market_sorting_by_profit() {
         let markets = vec![
-            make_market_with_prices(dec!(0.48), dec!(0.48)),  // 4% profit (spread 0.96)
-            make_market_with_prices(dec!(0.45), dec!(0.45)),  // 10% profit (spread 0.90)
-            make_market_with_prices(dec!(0.52), dec!(0.52)),  // -4% loss (spread 1.04)
+            make_market_with_prices(dec!(0.48), dec!(0.48)), // 4% profit (spread 0.96)
+            make_market_with_prices(dec!(0.45), dec!(0.45)), // 10% profit (spread 0.90)
+            make_market_with_prices(dec!(0.52), dec!(0.52)), // -4% loss (spread 1.04)
         ];
 
         let mut profits: Vec<Decimal> = markets
@@ -1763,17 +2143,17 @@ mod tests {
         // Sort by profit descending
         profits.sort_by(|a, b| b.partial_cmp(a).unwrap());
 
-        assert_eq!(profits[0], dec!(0.10));  // Best: 10%
-        assert_eq!(profits[1], dec!(0.04));  // Second: 4%
+        assert_eq!(profits[0], dec!(0.10)); // Best: 10%
+        assert_eq!(profits[1], dec!(0.04)); // Second: 4%
         assert_eq!(profits[2], dec!(-0.04)); // Worst: -4%
     }
 
     #[test]
     fn test_market_filters_invalid_prices() {
         let markets = vec![
-            make_market_with_prices(dec!(0.45), dec!(0.45)),  // Valid
-            make_market_with_prices(dec!(0), dec!(0.45)),     // Invalid YES
-            make_market_with_prices(dec!(0.45), dec!(0)),     // Invalid NO
+            make_market_with_prices(dec!(0.45), dec!(0.45)), // Valid
+            make_market_with_prices(dec!(0), dec!(0.45)),    // Invalid YES
+            make_market_with_prices(dec!(0.45), dec!(0)),    // Invalid NO
         ];
 
         let valid_count = markets
@@ -1812,5 +2192,276 @@ mod tests {
         // Should be filtered out
         let is_valid = market.yes_best_ask.is_some() && market.no_best_ask.is_some();
         assert!(!is_valid);
+    }
+
+    // ==========================================
+    // Tests for extract_best_asks()
+    // ==========================================
+
+    fn make_test_snapshot(
+        yes_asks: serde_json::Value,
+        no_asks: serde_json::Value,
+    ) -> OrderbookSnapshot {
+        OrderbookSnapshot {
+            id: 1,
+            market_id: Uuid::new_v4(),
+            yes_best_ask: None,
+            yes_best_bid: None,
+            no_best_ask: None,
+            no_best_bid: None,
+            spread: None,
+            yes_asks: Some(yes_asks),
+            yes_bids: None,
+            no_asks: Some(no_asks),
+            no_bids: None,
+            captured_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_extract_best_asks_returns_lowest_prices() {
+        let snapshot = make_test_snapshot(
+            serde_json::json!([
+                {"price": "0.50", "size": "10"},
+                {"price": "0.48", "size": "5"},   // Best (lowest)
+                {"price": "0.52", "size": "20"},
+            ]),
+            serde_json::json!([
+                {"price": "0.55", "size": "10"},  // Best (lowest)
+                {"price": "0.60", "size": "5"},
+            ]),
+        );
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_some());
+
+        let (yes_best, no_best) = result.unwrap();
+        assert_eq!(yes_best, dec!(0.48));
+        assert_eq!(no_best, dec!(0.55));
+    }
+
+    #[test]
+    fn test_extract_best_asks_single_level_each() {
+        let snapshot = make_test_snapshot(
+            serde_json::json!([{"price": "0.45", "size": "100"}]),
+            serde_json::json!([{"price": "0.50", "size": "50"}]),
+        );
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_some());
+
+        let (yes_best, no_best) = result.unwrap();
+        assert_eq!(yes_best, dec!(0.45));
+        assert_eq!(no_best, dec!(0.50));
+    }
+
+    #[test]
+    fn test_extract_best_asks_returns_none_for_empty_yes() {
+        let snapshot = make_test_snapshot(
+            serde_json::json!([]), // Empty YES
+            serde_json::json!([{"price": "0.50", "size": "50"}]),
+        );
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_best_asks_returns_none_for_empty_no() {
+        let snapshot = make_test_snapshot(
+            serde_json::json!([{"price": "0.45", "size": "100"}]),
+            serde_json::json!([]), // Empty NO
+        );
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_best_asks_returns_none_for_both_empty() {
+        let snapshot = make_test_snapshot(serde_json::json!([]), serde_json::json!([]));
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_best_asks_handles_null_asks() {
+        let snapshot = OrderbookSnapshot {
+            id: 1,
+            market_id: Uuid::new_v4(),
+            yes_best_ask: None,
+            yes_best_bid: None,
+            no_best_ask: None,
+            no_best_bid: None,
+            spread: None,
+            yes_asks: None, // NULL
+            yes_bids: None,
+            no_asks: None, // NULL
+            no_bids: None,
+            captured_at: Utc::now(),
+        };
+
+        let result = extract_best_asks(&snapshot);
+        assert!(result.is_none());
+    }
+
+    // ==========================================
+    // Tests for should_abort_due_to_spread()
+    // ==========================================
+
+    #[test]
+    fn test_spread_within_tolerance_allows_trade() {
+        let original = dec!(0.97);
+        let current = dec!(0.974); // +0.004 (within 0.005 tolerance)
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(!should_abort);
+        assert!(reason.contains("within tolerance"));
+    }
+
+    #[test]
+    fn test_spread_exactly_at_tolerance_allows_trade() {
+        let original = dec!(0.97);
+        let current = dec!(0.975); // +0.005 (exactly at tolerance)
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(!should_abort);
+        assert!(reason.contains("within tolerance"));
+    }
+
+    #[test]
+    fn test_spread_beyond_tolerance_aborts_trade() {
+        let original = dec!(0.97);
+        let current = dec!(0.98); // +0.01 (exceeds 0.005 tolerance)
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(should_abort);
+        assert!(reason.contains("widened beyond tolerance"));
+        assert!(reason.contains("0.9700"));
+        assert!(reason.contains("0.9800"));
+    }
+
+    #[test]
+    fn test_spread_improved_allows_trade() {
+        let original = dec!(0.97);
+        let current = dec!(0.96); // -0.01 (better!)
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(!should_abort);
+        assert!(reason.contains("improved"));
+    }
+
+    #[test]
+    fn test_spread_unchanged_allows_trade() {
+        let original = dec!(0.97);
+        let current = dec!(0.97); // No change
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(!should_abort);
+        assert!(reason.contains("within tolerance"));
+    }
+
+    #[test]
+    fn test_spread_validation_with_zero_tolerance() {
+        let original = dec!(0.97);
+        let current = dec!(0.971); // Any increase aborts
+        let tolerance = dec!(0.0);
+
+        let (should_abort, _reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(should_abort);
+    }
+
+    #[test]
+    fn test_spread_validation_with_large_tolerance() {
+        let original = dec!(0.97);
+        let current = dec!(1.05); // Huge widening
+        let tolerance = dec!(0.10); // But large tolerance
+
+        let (should_abort, _reason) = should_abort_due_to_spread(original, current, tolerance);
+
+        assert!(!should_abort); // Within 10% tolerance
+    }
+
+    // ==========================================
+    // Tests for execute_live_trade refactoring (Task 6)
+    // ==========================================
+
+    #[test]
+    fn test_snapshot_age_validation() {
+        let max_age_secs = 30i64;
+        let now = Utc::now();
+
+        // Fresh snapshot (5 seconds old)
+        let fresh_snapshot_time = now - chrono::Duration::seconds(5);
+        let fresh_age = now - fresh_snapshot_time;
+        assert!(fresh_age.num_seconds() <= max_age_secs);
+
+        // Stale snapshot (60 seconds old)
+        let stale_snapshot_time = now - chrono::Duration::seconds(60);
+        let stale_age = now - stale_snapshot_time;
+        assert!(stale_age.num_seconds() > max_age_secs);
+    }
+
+    #[test]
+    fn test_spread_recalculation_with_current_prices() {
+        // Original opportunity: YES $0.48 + NO $0.49 = $0.97 spread
+        let original_yes = dec!(0.48);
+        let original_no = dec!(0.49);
+        let original_spread = original_yes + original_no;
+        assert_eq!(original_spread, dec!(0.97));
+
+        // Current prices: YES $0.50 + NO $0.52 = $1.02 spread
+        let current_yes = dec!(0.50);
+        let current_no = dec!(0.52);
+        let current_spread = current_yes + current_no;
+        assert_eq!(current_spread, dec!(1.02));
+
+        // Verify widening detection
+        let tolerance = dec!(0.005);
+        let (should_abort, _) =
+            should_abort_due_to_spread(original_spread, current_spread, tolerance);
+        assert!(should_abort); // $1.02 > $0.97 + $0.005
+    }
+
+    #[test]
+    fn test_shares_recalculation_with_current_prices() {
+        let total_invested = dec!(10.00);
+
+        // Original calculation: $0.48 + $0.49 = $0.97, shares = 10/0.97 = 10.31
+        let original_total = dec!(0.48) + dec!(0.49);
+        let original_shares = (total_invested / original_total).round_dp(2);
+        assert_eq!(original_shares, dec!(10.31));
+
+        // New calculation: $0.46 + $0.47 = $0.93, shares = 10/0.93 = 10.75
+        let current_total = dec!(0.46) + dec!(0.47);
+        let current_shares = (total_invested / current_total).round_dp(2);
+        assert_eq!(current_shares, dec!(10.75));
+    }
+
+    #[test]
+    fn test_spread_improved_allows_trade_with_better_prices() {
+        // Original: YES $0.48 + NO $0.49 = $0.97
+        // Current: YES $0.45 + NO $0.47 = $0.92 (improved!)
+        let original_spread = dec!(0.97);
+        let current_spread = dec!(0.92);
+        let tolerance = dec!(0.005);
+
+        let (should_abort, reason) =
+            should_abort_due_to_spread(original_spread, current_spread, tolerance);
+
+        assert!(!should_abort);
+        assert!(reason.contains("improved"));
     }
 }

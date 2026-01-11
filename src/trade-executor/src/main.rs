@@ -97,8 +97,7 @@ async fn main() -> Result<()> {
     // Initialize logging with RUST_LOG env var support (default: info)
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"))
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
         .compact()
@@ -144,6 +143,10 @@ async fn main() -> Result<()> {
             .split(',')
             .map(|s| s.trim().to_string())
             .collect(),
+        spread_tolerance: std::env::var("SPREAD_TOLERANCE")
+            .ok()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(dec!(0.005)),
     };
 
     // Create executor
@@ -158,9 +161,7 @@ async fn main() -> Result<()> {
     } else {
         // Setup graceful shutdown
         let shutdown = async {
-            signal::ctrl_c()
-                .await
-                .expect("failed to listen for ctrl+c");
+            signal::ctrl_c().await.expect("failed to listen for ctrl+c");
             info!("Shutdown signal received");
         };
 

@@ -1,6 +1,7 @@
 //! Trade executor configuration.
 
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 /// Trade executor configuration.
 #[derive(Debug, Clone)]
@@ -29,6 +30,10 @@ pub struct ExecutorConfig {
     pub fee_rate: Decimal,
     /// Assets to trade
     pub assets: Vec<String>,
+    /// Maximum allowed spread widening before aborting trade.
+    /// This is an absolute value (e.g., 0.005 = $0.005).
+    /// Default: 0.005 (0.5%)
+    pub spread_tolerance: Decimal,
 }
 
 impl Default for ExecutorConfig {
@@ -36,21 +41,76 @@ impl Default for ExecutorConfig {
         Self {
             dry_run: true,
             starting_balance: Decimal::new(10000, 0),
-            min_profit: Decimal::new(1, 2), // 0.01 = 1%
-            base_position_size: Decimal::new(10, 0), // $10 baseline
-            max_position_size: Decimal::new(20, 0),  // $20 max with liquidity
+            min_profit: Decimal::new(1, 2),           // 0.01 = 1%
+            base_position_size: Decimal::new(10, 0),  // $10 baseline
+            max_position_size: Decimal::new(20, 0),   // $20 max with liquidity
             liquidity_threshold: Decimal::new(50, 0), // $50 depth needed for max size
             max_total_exposure: Decimal::new(1000, 0),
             max_orderbook_age_secs: 30,
             max_price_age_secs: 60,
             max_time_to_expiry_secs: 3600, // 1 hour
-            fee_rate: Decimal::new(1, 3), // 0.001 = 0.1%
+            fee_rate: Decimal::new(1, 3),  // 0.001 = 0.1%
             assets: vec![
                 "BTC".to_string(),
                 "ETH".to_string(),
                 "SOL".to_string(),
                 "XRP".to_string(),
             ],
+            spread_tolerance: dec!(0.005),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn test_config_has_spread_tolerance_default() {
+        let config = ExecutorConfig::default();
+        assert_eq!(config.spread_tolerance, dec!(0.005)); // 0.5% default
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_spread_tolerance_from_env() {
+        // Save existing value
+        let saved = std::env::var("SPREAD_TOLERANCE").ok();
+
+        // Set test value
+        std::env::set_var("SPREAD_TOLERANCE", "0.01");
+
+        // Parse and verify
+        let spread_tolerance = std::env::var("SPREAD_TOLERANCE")
+            .ok()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(dec!(0.005));
+        assert_eq!(spread_tolerance, dec!(0.01));
+
+        // Restore original value
+        match saved {
+            Some(val) => std::env::set_var("SPREAD_TOLERANCE", val),
+            None => std::env::remove_var("SPREAD_TOLERANCE"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_spread_tolerance_invalid_uses_default() {
+        let saved = std::env::var("SPREAD_TOLERANCE").ok();
+
+        std::env::set_var("SPREAD_TOLERANCE", "not_a_number");
+
+        let spread_tolerance = std::env::var("SPREAD_TOLERANCE")
+            .ok()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(dec!(0.005));
+        assert_eq!(spread_tolerance, dec!(0.005)); // Falls back to default
+
+        match saved {
+            Some(val) => std::env::set_var("SPREAD_TOLERANCE", val),
+            None => std::env::remove_var("SPREAD_TOLERANCE"),
         }
     }
 }

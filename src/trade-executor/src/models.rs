@@ -40,6 +40,39 @@ pub struct TradeDetails {
     pub profit_pct: Decimal,
 }
 
+/// Result of a live trade execution attempt.
+/// Distinguishes between successful execution and intentional abort.
+#[derive(Debug, Clone)]
+pub enum LiveTradeResult {
+    /// Trade was successfully executed (orders placed).
+    Executed {
+        /// Amount actually invested after order fills.
+        invested: Decimal,
+        /// YES shares acquired.
+        yes_filled: Decimal,
+        /// NO shares acquired.
+        no_filled: Decimal,
+    },
+    /// Trade was intentionally aborted before placing orders.
+    /// This is NOT an error - validation detected unfavorable conditions.
+    Aborted {
+        /// Human-readable reason for abort.
+        reason: String,
+    },
+}
+
+impl LiveTradeResult {
+    /// Returns true if the trade was executed.
+    pub fn is_executed(&self) -> bool {
+        matches!(self, LiveTradeResult::Executed { .. })
+    }
+
+    /// Returns true if the trade was aborted.
+    pub fn is_aborted(&self) -> bool {
+        matches!(self, LiveTradeResult::Aborted { .. })
+    }
+}
+
 /// Bot state machine states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotState {
@@ -287,5 +320,66 @@ mod tests {
 
         let cloned = details.clone();
         assert_eq!(cloned.net_profit, details.net_profit);
+    }
+
+    // ============ LiveTradeResult TESTS ============
+
+    #[test]
+    fn test_live_trade_result_executed() {
+        let result = LiveTradeResult::Executed {
+            invested: dec!(100),
+            yes_filled: dec!(50),
+            no_filled: dec!(50),
+        };
+
+        assert!(result.is_executed());
+        assert!(!result.is_aborted());
+
+        match result {
+            LiveTradeResult::Executed {
+                invested,
+                yes_filled,
+                no_filled,
+            } => {
+                assert_eq!(invested, dec!(100));
+                assert_eq!(yes_filled, dec!(50));
+                assert_eq!(no_filled, dec!(50));
+            }
+            LiveTradeResult::Aborted { .. } => panic!("Expected Executed"),
+        }
+    }
+
+    #[test]
+    fn test_live_trade_result_aborted() {
+        let result = LiveTradeResult::Aborted {
+            reason: "Spread widened beyond tolerance".to_string(),
+        };
+
+        assert!(!result.is_executed());
+        assert!(result.is_aborted());
+
+        match result {
+            LiveTradeResult::Aborted { reason } => {
+                assert!(reason.contains("Spread widened"));
+            }
+            LiveTradeResult::Executed { .. } => panic!("Expected Aborted"),
+        }
+    }
+
+    #[test]
+    fn test_live_trade_result_clone() {
+        let result = LiveTradeResult::Executed {
+            invested: dec!(50),
+            yes_filled: dec!(25),
+            no_filled: dec!(25),
+        };
+
+        let cloned = result.clone();
+        match cloned {
+            LiveTradeResult::Executed { invested, .. } => {
+                assert_eq!(invested, dec!(50));
+            }
+            _ => panic!("Clone should preserve variant"),
+        }
     }
 }
