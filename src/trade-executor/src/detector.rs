@@ -61,7 +61,11 @@ impl SpreadDetector {
             tracing::debug!(
                 "Market {}: YES={}, NO={}, spread={}, profit_pct={}, min={}",
                 &market.name[..market.name.len().min(40)],
-                yes_ask, no_ask, spread, profit_pct, self.min_profit
+                yes_ask,
+                no_ask,
+                spread,
+                profit_pct,
+                self.min_profit
             );
         }
 
@@ -94,7 +98,11 @@ impl SpreadDetector {
             .collect();
 
         // Sort by profit percentage (highest first)
-        opportunities.sort_by(|a, b| b.profit_pct.partial_cmp(&a.profit_pct).unwrap_or(std::cmp::Ordering::Equal));
+        opportunities.sort_by(|a, b| {
+            b.profit_pct
+                .partial_cmp(&a.profit_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         opportunities
     }
 

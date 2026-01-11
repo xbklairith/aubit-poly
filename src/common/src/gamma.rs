@@ -91,7 +91,11 @@ impl MarketType {
             if (o0 == "up" && o1 == "down") || (o0 == "down" && o1 == "up") {
                 return MarketType::UpDown;
             }
-            if o0.contains("above") || o0.contains("below") || o1.contains("above") || o1.contains("below") {
+            if o0.contains("above")
+                || o0.contains("below")
+                || o1.contains("above")
+                || o1.contains("below")
+            {
                 return MarketType::Above;
             }
         }
@@ -100,7 +104,10 @@ impl MarketType {
 
     /// Check if this market type is supported for trading.
     pub fn is_supported(&self) -> bool {
-        matches!(self, MarketType::UpDown | MarketType::Above | MarketType::PriceRange)
+        matches!(
+            self,
+            MarketType::UpDown | MarketType::Above | MarketType::PriceRange
+        )
     }
 }
 
@@ -155,13 +162,15 @@ pub struct GammaMarket {
 impl GammaMarket {
     /// Parse the clob_token_ids JSON string into a vector
     pub fn parse_token_ids(&self) -> Option<Vec<String>> {
-        self.clob_token_ids.as_ref()
+        self.clob_token_ids
+            .as_ref()
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
     }
 
     /// Parse outcomes JSON string
     pub fn parse_outcomes(&self) -> Option<Vec<String>> {
-        self.outcomes.as_ref()
+        self.outcomes
+            .as_ref()
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
     }
 }
@@ -203,12 +212,16 @@ impl GammaClient {
     }
 
     /// Fetch active events for a specific series from the Gamma API.
-    pub async fn fetch_events_by_series(&self, series_id: &str) -> Result<Vec<GammaEvent>, GammaError> {
+    pub async fn fetch_events_by_series(
+        &self,
+        series_id: &str,
+    ) -> Result<Vec<GammaEvent>, GammaError> {
         let url = format!("{}/events", self.base_url);
 
         debug!("Fetching events for series_id={}", series_id);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .query(&[
                 ("series_id", series_id),
@@ -240,7 +253,8 @@ impl GammaClient {
         while offset < max_events {
             let url = format!("{}/events", self.base_url);
 
-            let response = self.client
+            let response = self
+                .client
                 .get(&url)
                 .query(&[
                     ("closed", "false"),
@@ -288,7 +302,11 @@ impl GammaClient {
                             }
                         }
                     }
-                    info!("Series '{}': found {} total markets so far", series_name, all_markets.len());
+                    info!(
+                        "Series '{}': found {} total markets so far",
+                        series_name,
+                        all_markets.len()
+                    );
                 }
                 Err(e) => {
                     debug!("Failed to fetch series {}: {}", series_name, e);
@@ -297,7 +315,10 @@ impl GammaClient {
             }
         }
 
-        info!("Total markets fetched from all series: {}", all_markets.len());
+        info!(
+            "Total markets fetched from all series: {}",
+            all_markets.len()
+        );
         Ok(all_markets)
     }
 
@@ -348,7 +369,9 @@ impl GammaClient {
     /// Parse a raw market into our format.
     fn parse_market(&self, market: GammaMarket) -> Option<ParsedMarket> {
         // Parse end time - Gamma uses ISO format like "2025-12-31T12:00:00Z"
-        let end_time = market.end_date.as_ref()
+        let end_time = market
+            .end_date
+            .as_ref()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc))?;
 
@@ -361,14 +384,22 @@ impl GammaClient {
         // Parse token IDs - should be array of 2 strings
         let token_ids = market.parse_token_ids()?;
         if token_ids.len() != 2 {
-            debug!("Skipping market with {} token IDs: {}", token_ids.len(), market.question);
+            debug!(
+                "Skipping market with {} token IDs: {}",
+                token_ids.len(),
+                market.question
+            );
             return None;
         }
 
         // Parse outcomes to determine YES/NO or UP/DOWN mapping
         let outcomes = market.parse_outcomes()?;
         if outcomes.len() != 2 {
-            debug!("Skipping market with {} outcomes: {}", outcomes.len(), market.question);
+            debug!(
+                "Skipping market with {} outcomes: {}",
+                outcomes.len(),
+                market.question
+            );
             return None;
         }
 
@@ -377,11 +408,17 @@ impl GammaClient {
         let (yes_idx, no_idx) = {
             let yes_pos = outcomes.iter().position(|o| {
                 let lower = o.to_lowercase();
-                lower == "yes" || lower == "up" || lower.contains("higher") || lower.contains("above")
+                lower == "yes"
+                    || lower == "up"
+                    || lower.contains("higher")
+                    || lower.contains("above")
             });
             let no_pos = outcomes.iter().position(|o| {
                 let lower = o.to_lowercase();
-                lower == "no" || lower == "down" || lower.contains("lower") || lower.contains("below")
+                lower == "no"
+                    || lower == "down"
+                    || lower.contains("lower")
+                    || lower.contains("below")
             });
             match (yes_pos, no_pos) {
                 (Some(y), Some(n)) => (y, n),
@@ -403,8 +440,12 @@ impl GammaClient {
 
         // Extract prices from Gamma API
         // best_bid/best_ask are for the YES (Up) outcome
-        let yes_best_bid = market.best_bid.and_then(|p| rust_decimal::Decimal::try_from(p).ok());
-        let yes_best_ask = market.best_ask.and_then(|p| rust_decimal::Decimal::try_from(p).ok());
+        let yes_best_bid = market
+            .best_bid
+            .and_then(|p| rust_decimal::Decimal::try_from(p).ok());
+        let yes_best_ask = market
+            .best_ask
+            .and_then(|p| rust_decimal::Decimal::try_from(p).ok());
 
         // Calculate NO prices: NO_bid = 1 - YES_ask, NO_ask = 1 - YES_bid
         let one = rust_decimal::Decimal::ONE;
@@ -437,7 +478,9 @@ impl GammaClient {
 fn extract_asset(question: &str) -> String {
     let question_upper = question.to_uppercase();
 
-    let assets = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LINK"];
+    let assets = [
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LINK",
+    ];
 
     for asset in assets {
         if question_upper.contains(asset) {
@@ -466,12 +509,18 @@ fn extract_timeframe(question: &str) -> String {
     // Look for common timeframe patterns (order matters - check shorter durations first)
 
     // 5-minute markets
-    if question_lower.contains("5 min") || question_lower.contains("5min") || question_lower.contains("-5m") {
+    if question_lower.contains("5 min")
+        || question_lower.contains("5min")
+        || question_lower.contains("-5m")
+    {
         return "5m".to_string();
     }
 
     // 15-minute markets
-    if question_lower.contains("15 min") || question_lower.contains("15min") || question_lower.contains("-15m") {
+    if question_lower.contains("15 min")
+        || question_lower.contains("15min")
+        || question_lower.contains("-15m")
+    {
         return "15m".to_string();
     }
 
@@ -501,9 +550,24 @@ fn extract_timeframe(question: &str) -> String {
     }
 
     // Daily markets (month names or "daily")
-    let months = ["january", "february", "march", "april", "may", "june",
-                  "july", "august", "september", "october", "november", "december"];
-    if months.iter().any(|m| question_lower.contains(m)) || question_lower.contains("daily") || question_lower.contains("24h") {
+    let months = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    if months.iter().any(|m| question_lower.contains(m))
+        || question_lower.contains("daily")
+        || question_lower.contains("24h")
+    {
         return "daily".to_string();
     }
 

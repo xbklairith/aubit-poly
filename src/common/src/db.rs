@@ -38,9 +38,7 @@ impl Database {
 
     /// Check if the database connection is healthy.
     pub async fn health_check(&self) -> Result<(), DbError> {
-        sqlx::query("SELECT 1")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
     }
 }

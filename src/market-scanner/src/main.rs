@@ -11,7 +11,8 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use common::{
-    deactivate_expired_markets, insert_orderbook_snapshot, upsert_market, Config, Database, GammaClient,
+    deactivate_expired_markets, insert_orderbook_snapshot, upsert_market, Config, Database,
+    GammaClient,
 };
 
 /// Market Scanner - discovers and tracks prediction markets
@@ -31,14 +32,19 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .init();
+    FmtSubscriber::builder().with_max_level(Level::INFO).init();
 
     let args = Args::parse();
 
     info!("Market Scanner starting...");
-    info!("Mode: {}", if args.once { "single run" } else { "continuous" });
+    info!(
+        "Mode: {}",
+        if args.once {
+            "single run"
+        } else {
+            "continuous"
+        }
+    );
     info!("Interval: {}s", args.interval);
 
     // Load configuration
@@ -128,10 +134,7 @@ async fn scan_markets(gamma: &GammaClient, db: &Database) -> Result<ScanStats> {
                 }
             }
             Err(e) => {
-                warn!(
-                    "Failed to upsert market {}: {}",
-                    market.condition_id, e
-                );
+                warn!("Failed to upsert market {}: {}", market.condition_id, e);
             }
         }
     }

@@ -384,7 +384,8 @@ pub async fn get_markets_with_fresh_orderbooks(
 
     // Check if "ALL" is in assets list to skip asset filtering
     if assets.iter().any(|a| a.eq_ignore_ascii_case("ALL")) {
-        return get_all_markets_with_fresh_orderbooks(pool, max_age_seconds, max_expiry_seconds).await;
+        return get_all_markets_with_fresh_orderbooks(pool, max_age_seconds, max_expiry_seconds)
+            .await;
     }
 
     // Use DISTINCT ON instead of LATERAL JOIN for better performance
@@ -594,7 +595,9 @@ pub async fn update_position_fills(
 }
 
 /// Get all open positions.
-pub async fn get_open_positions(pool: &PgPool) -> Result<Vec<crate::models::Position>, sqlx::Error> {
+pub async fn get_open_positions(
+    pool: &PgPool,
+) -> Result<Vec<crate::models::Position>, sqlx::Error> {
     let positions = sqlx::query_as!(
         crate::models::Position,
         r#"
@@ -673,18 +676,25 @@ mod tests {
         };
 
         // Insert new market
-        let id = upsert_market(db.pool(), &test_market).await.expect("Upsert should succeed");
+        let id = upsert_market(db.pool(), &test_market)
+            .await
+            .expect("Upsert should succeed");
         assert!(!id.is_nil());
 
         // Upsert same market (should update, return same id)
-        let id2 = upsert_market(db.pool(), &test_market).await.expect("Second upsert should succeed");
+        let id2 = upsert_market(db.pool(), &test_market)
+            .await
+            .expect("Second upsert should succeed");
         assert_eq!(id, id2);
 
         // Clean up
-        sqlx::query!("DELETE FROM markets WHERE condition_id = $1", test_market.condition_id)
-            .execute(db.pool())
-            .await
-            .expect("Cleanup should succeed");
+        sqlx::query!(
+            "DELETE FROM markets WHERE condition_id = $1",
+            test_market.condition_id
+        )
+        .execute(db.pool())
+        .await
+        .expect("Cleanup should succeed");
     }
 
     #[tokio::test]
@@ -710,14 +720,19 @@ mod tests {
         .expect("Insert should succeed");
 
         // Deactivate expired
-        let count = deactivate_expired_markets(db.pool()).await.expect("Deactivate should succeed");
+        let count = deactivate_expired_markets(db.pool())
+            .await
+            .expect("Deactivate should succeed");
         assert!(count >= 1, "Should deactivate at least 1 market");
 
         // Verify deactivated
-        let market = sqlx::query!("SELECT is_active FROM markets WHERE condition_id = $1", condition_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("Fetch should succeed");
+        let market = sqlx::query!(
+            "SELECT is_active FROM markets WHERE condition_id = $1",
+            condition_id
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("Fetch should succeed");
         assert!(!market.is_active.unwrap_or(true));
 
         // Clean up

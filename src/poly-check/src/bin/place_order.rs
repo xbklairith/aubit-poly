@@ -69,14 +69,19 @@ async fn main() -> Result<()> {
         let min_amount = min_shares * args.price;
         anyhow::bail!(
             "Order too small. Min {} shares required. At ${:.2} price, min amount is ${:.2}",
-            min_shares, args.price, min_amount
+            min_shares,
+            args.price,
+            min_amount
         );
     }
 
     println!("\n{}", "=".repeat(50));
     println!("Order Details:");
     println!("{}", "=".repeat(50));
-    println!("  Token ID: {}...", &args.token_id[..20.min(args.token_id.len())]);
+    println!(
+        "  Token ID: {}...",
+        &args.token_id[..20.min(args.token_id.len())]
+    );
     println!("  Side: {}", args.side.to_uppercase());
     println!("  Price: ${:.2}", args.price);
     println!("  Amount: ${:.2}", args.amount);
@@ -87,8 +92,8 @@ async fn main() -> Result<()> {
     println!("{}", "=".repeat(50));
 
     // Get private key
-    let private_key = std::env::var("WALLET_PRIVATE_KEY")
-        .context("Missing WALLET_PRIVATE_KEY in environment")?;
+    let private_key =
+        std::env::var("WALLET_PRIVATE_KEY").context("Missing WALLET_PRIVATE_KEY in environment")?;
 
     let private_key = if private_key.starts_with("0x") {
         private_key
@@ -122,9 +127,8 @@ async fn main() -> Result<()> {
         .signature_type(signature_type);
 
     if let Some(ref proxy) = proxy_wallet {
-        let funder_address: alloy::primitives::Address = proxy
-            .parse()
-            .context("Invalid proxy wallet address")?;
+        let funder_address: alloy::primitives::Address =
+            proxy.parse().context("Invalid proxy wallet address")?;
         auth_builder = auth_builder.funder(funder_address);
         info!("Funder (proxy): {}", proxy);
     }
@@ -138,8 +142,13 @@ async fn main() -> Result<()> {
 
     if args.dry_run {
         println!("\n[DRY RUN] Would place order:");
-        println!("  {} {:.2} shares of {} at ${:.2}",
-            args.side.to_uppercase(), shares, &args.token_id[..20.min(args.token_id.len())], args.price);
+        println!(
+            "  {} {:.2} shares of {} at ${:.2}",
+            args.side.to_uppercase(),
+            shares,
+            &args.token_id[..20.min(args.token_id.len())],
+            args.price
+        );
         println!("\nTo execute for real, remove --dry-run flag");
         return Ok(());
     }

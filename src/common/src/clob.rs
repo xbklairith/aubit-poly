@@ -70,17 +70,13 @@ impl BookMessage {
     /// Get best bid price (highest bid).
     /// Uses max() for robustness - doesn't rely on API sort order.
     pub fn best_bid(&self) -> Option<Decimal> {
-        self.bids.iter()
-            .filter_map(|p| p.price_decimal())
-            .max()
+        self.bids.iter().filter_map(|p| p.price_decimal()).max()
     }
 
     /// Get best ask price (lowest ask).
     /// Uses min() for robustness - doesn't rely on API sort order.
     pub fn best_ask(&self) -> Option<Decimal> {
-        self.asks.iter()
-            .filter_map(|p| p.price_decimal())
-            .min()
+        self.asks.iter().filter_map(|p| p.price_decimal()).min()
     }
 }
 
@@ -224,9 +220,7 @@ impl ClobClient {
     }
 
     /// Connect to the WebSocket.
-    pub async fn connect(
-        &self,
-    ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, ClobError> {
+    pub async fn connect(&self) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, ClobError> {
         info!("Connecting to CLOB WebSocket: {}", self.ws_url);
 
         let connect_timeout = Duration::from_secs(30);

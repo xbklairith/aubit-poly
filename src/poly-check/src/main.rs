@@ -76,8 +76,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Get private key
-    let private_key = std::env::var("WALLET_PRIVATE_KEY")
-        .context("Missing WALLET_PRIVATE_KEY in environment")?;
+    let private_key =
+        std::env::var("WALLET_PRIVATE_KEY").context("Missing WALLET_PRIVATE_KEY in environment")?;
 
     let private_key = if private_key.starts_with("0x") {
         private_key
@@ -115,9 +115,8 @@ async fn main() -> Result<()> {
 
     // Add funder address for GnosisSafe signature type
     if let Some(ref proxy) = proxy_wallet {
-        let funder_address: alloy::primitives::Address = proxy
-            .parse()
-            .context("Invalid proxy wallet address")?;
+        let funder_address: alloy::primitives::Address =
+            proxy.parse().context("Invalid proxy wallet address")?;
         auth_builder = auth_builder.funder(funder_address);
     }
 
@@ -192,10 +191,7 @@ async fn main() -> Result<()> {
                             let size = pos.get("size").and_then(|v| v.as_str()).unwrap_or("0");
                             let avg_price = pos.get("avgPrice").and_then(|v| v.as_str());
 
-                            println!(
-                                "    - Asset: {}...",
-                                &asset[..20.min(asset.len())]
-                            );
+                            println!("    - Asset: {}...", &asset[..20.min(asset.len())]);
                             println!("      Size: {}", size);
                             if let Some(avg) = avg_price {
                                 println!("      Avg Price: {}", avg);

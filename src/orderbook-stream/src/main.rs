@@ -71,9 +71,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .init();
+    FmtSubscriber::builder().with_max_level(Level::INFO).init();
 
     let args = Args::parse();
 
@@ -187,18 +185,42 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     for msg in buffered {
         match msg {
             ClobMessage::Books(books) => {
-                info!("Processing buffered batch of {} book snapshots", books.len());
+                info!(
+                    "Processing buffered batch of {} book snapshots",
+                    books.len()
+                );
                 for book in books {
-                    process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                    process_book(
+                        &book,
+                        &token_to_market,
+                        &mut orderbooks,
+                        db,
+                        &mut snapshot_count,
+                        args.once,
+                        markets.len(),
+                    )
+                    .await?;
                 }
             }
             ClobMessage::Book(book) => {
-                process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                process_book(
+                    &book,
+                    &token_to_market,
+                    &mut orderbooks,
+                    db,
+                    &mut snapshot_count,
+                    args.once,
+                    markets.len(),
+                )
+                .await?;
             }
             _ => {}
         }
     }
-    info!("Processed buffered messages, snapshot_count={}", snapshot_count);
+    info!(
+        "Processed buffered messages, snapshot_count={}",
+        snapshot_count
+    );
     let mut last_ping = std::time::Instant::now();
     let ping_interval = Duration::from_secs(10);
     let mut consecutive_timeouts = 0;
@@ -217,14 +239,20 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     loop {
         // Log stats every 5 seconds to confirm data is streaming
         if last_stats_log.elapsed() >= stats_interval {
-            info!("Stream stats: {} messages received, {} snapshots saved, uptime {}s",
-                  message_count, snapshot_count, connection_start.elapsed().as_secs());
+            info!(
+                "Stream stats: {} messages received, {} snapshots saved, uptime {}s",
+                message_count,
+                snapshot_count,
+                connection_start.elapsed().as_secs()
+            );
             last_stats_log = std::time::Instant::now();
         }
         // Check if it's time to reconnect for fresh orderbook snapshots
         if connection_start.elapsed() >= reconnect_interval {
-            info!("Reconnect interval reached ({}s). Reconnecting to refresh all orderbooks...",
-                  args.reconnect_interval);
+            info!(
+                "Reconnect interval reached ({}s). Reconnecting to refresh all orderbooks...",
+                args.reconnect_interval
+            );
             return Ok(());
         }
         // Send keepalive ping every 10 seconds per Polymarket docs
@@ -237,10 +265,8 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
         }
 
         // Use timeout to not block forever waiting for messages
-        let read_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            clob.read_message(&mut ws)
-        ).await;
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(5), clob.read_message(&mut ws)).await;
 
         match read_result {
             Ok(Ok(Some(ClobMessage::Books(books)))) => {
@@ -249,7 +275,16 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                 // Batch of book snapshots (initial subscription response)
                 info!("Received batch of {} book snapshots", books.len());
                 for book in books {
-                    process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                    process_book(
+                        &book,
+                        &token_to_market,
+                        &mut orderbooks,
+                        db,
+                        &mut snapshot_count,
+                        args.once,
+                        markets.len(),
+                    )
+                    .await?;
                 }
                 if args.once && snapshot_count >= markets.len() {
                     info!("Captured snapshots for all {} markets", markets.len());
@@ -260,7 +295,16 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                 consecutive_timeouts = 0; // Reset on successful message
                 message_count += 1;
                 debug!("Received book update for asset {}", book.asset_id);
-                process_book(&book, &token_to_market, &mut orderbooks, db, &mut snapshot_count, args.once, markets.len()).await?;
+                process_book(
+                    &book,
+                    &token_to_market,
+                    &mut orderbooks,
+                    db,
+                    &mut snapshot_count,
+                    args.once,
+                    markets.len(),
+                )
+                .await?;
                 if args.once && snapshot_count >= markets.len() {
                     info!("Captured snapshots for all {} markets", markets.len());
                     return Ok(());
@@ -298,9 +342,14 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                 if consecutive_timeouts >= max_consecutive_timeouts {
                     error!("No data received for {} consecutive timeouts ({} seconds). Connection dead.",
                            consecutive_timeouts, consecutive_timeouts * 5);
-                    return Err(anyhow::anyhow!("WebSocket connection stale - no data received"));
+                    return Err(anyhow::anyhow!(
+                        "WebSocket connection stale - no data received"
+                    ));
                 }
-                debug!("Read timeout ({}/{}), checking ping...", consecutive_timeouts, max_consecutive_timeouts);
+                debug!(
+                    "Read timeout ({}/{}), checking ping...",
+                    consecutive_timeouts, max_consecutive_timeouts
+                );
             }
         }
     }

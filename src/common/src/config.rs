@@ -102,7 +102,10 @@ mod tests {
 
         assert_eq!(config.database_url, "postgres://localhost/test");
         assert_eq!(config.gamma_api_url, "https://gamma-api.polymarket.com");
-        assert_eq!(config.clob_ws_url, "wss://ws-subscriptions-clob.polymarket.com/ws");
+        assert_eq!(
+            config.clob_ws_url,
+            "wss://ws-subscriptions-clob.polymarket.com/ws"
+        );
         assert_eq!(config.scan_interval_secs, 60);
 
         // Cleanup
