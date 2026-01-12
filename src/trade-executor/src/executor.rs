@@ -473,25 +473,22 @@ impl TradeExecutor {
             futures::future::join_all(fee_futures)
         );
 
-        // Track successfully warmed tokens
+        // Track all tokens (success or fail) to avoid retry loops
         let mut warmed_count = 0;
         let mut failed_count = 0;
         for (i, token_id) in token_ids.iter().enumerate() {
             let tick_ok = tick_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
             let fee_ok = fee_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+            // Always add to set - prevents retry loops for invalid/expired tokens
+            self.warmed_tokens.insert(token_id.to_string());
             if tick_ok && fee_ok {
-                self.warmed_tokens.insert(token_id.to_string());
                 warmed_count += 1;
             } else {
                 failed_count += 1;
-                if failed_count <= 5 {
-                    warn!("[CACHE] Failed to warm token {}: tick={}, fee={}",
-                        &token_id[..20.min(token_id.len())], tick_ok, fee_ok);
-                }
             }
         }
-        if failed_count > 5 {
-            warn!("[CACHE] ... and {} more failures", failed_count - 5);
+        if failed_count > 0 {
+            debug!("[CACHE] {} tokens failed to warm (invalid/expired)", failed_count);
         }
 
         let elapsed = start.elapsed();
@@ -531,6 +528,7 @@ impl TradeExecutor {
         );
 
         // Step 1b: Warm cache for any NEW tokens (not in warmed_tokens set)
+        // Only warm tokens for markets we just fetched (already filtered by assets/freshness)
         if !self.config.dry_run {
             let new_tokens: Vec<String> = markets
                 .iter()
@@ -538,9 +536,12 @@ impl TradeExecutor {
                 .filter(|t| !self.warmed_tokens.contains(t))
                 .collect();
 
-            if !new_tokens.is_empty() {
+            // Only warm if there are a reasonable number of new tokens
+            // Skip if too many (probably stale data or first run - startup handles that)
+            const MAX_INCREMENTAL_TOKENS: usize = 20;
+            if !new_tokens.is_empty() && new_tokens.len() <= MAX_INCREMENTAL_TOKENS {
                 if let Ok((clob_client, _)) = self.ensure_authenticated().await {
-                    info!("[CACHE] Warming {} new tokens in parallel...", new_tokens.len());
+                    info!("[CACHE] Warming {} new tokens...", new_tokens.len());
                     let warm_start = std::time::Instant::now();
 
                     // Create futures for parallel execution
@@ -559,35 +560,32 @@ impl TradeExecutor {
                         futures::future::join_all(fee_futures)
                     );
 
-                    // Collect successfully warmed tokens
-                    let successfully_warmed: Vec<String> = new_tokens
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, token_id)| {
-                            let tick_ok = tick_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
-                            let fee_ok = fee_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
-                            if tick_ok && fee_ok {
-                                Some(token_id.clone())
-                            } else {
-                                warn!("[CACHE] Failed to warm token {}: tick={}, fee={}",
-                                    &token_id[..20.min(token_id.len())], tick_ok, fee_ok);
-                                None
-                            }
-                        })
-                        .collect();
+                    // Track all tokens (success or fail) to avoid retry loops
+                    let mut success_count = 0;
+                    let mut fail_count = 0;
+                    for (i, token_id) in new_tokens.iter().enumerate() {
+                        let tick_ok = tick_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+                        let fee_ok = fee_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+                        // Always add to set - prevents retry loops for invalid tokens
+                        self.warmed_tokens.insert(token_id.clone());
+                        if tick_ok && fee_ok {
+                            success_count += 1;
+                        } else {
+                            fail_count += 1;
+                        }
+                    }
 
-                    debug!(
-                        "[CACHE] {}/{} new tokens warmed in {:?}",
-                        successfully_warmed.len(),
-                        new_tokens.len(),
-                        warm_start.elapsed()
-                    );
-
-                    // Insert after clob_client scope ends
-                    for token_id in successfully_warmed {
-                        self.warmed_tokens.insert(token_id);
+                    if fail_count > 0 {
+                        debug!("[CACHE] {}/{} tokens warmed ({} failed) in {:?}",
+                            success_count, new_tokens.len(), fail_count, warm_start.elapsed());
+                    } else {
+                        debug!("[CACHE] {} tokens warmed in {:?}",
+                            success_count, warm_start.elapsed());
                     }
                 }
+            } else if new_tokens.len() > MAX_INCREMENTAL_TOKENS {
+                debug!("[CACHE] Skipping incremental warmup ({} tokens > {} limit)",
+                    new_tokens.len(), MAX_INCREMENTAL_TOKENS);
             }
 
             // Memory safeguard: if set grows too large, clear it (SDK cache still exists)
