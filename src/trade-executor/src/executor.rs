@@ -1,6 +1,6 @@
 //! Trade executor state machine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -284,6 +284,8 @@ pub struct TradeExecutor {
     session: SessionState,
     /// Cached authentication for Polymarket CLOB (None = not yet authenticated)
     cached_auth: Option<CachedAuthentication>,
+    /// Token IDs that have been warmed in SDK cache (tick_size + fee_rate)
+    warmed_tokens: HashSet<String>,
 }
 
 impl TradeExecutor {
@@ -315,6 +317,7 @@ impl TradeExecutor {
             state: BotState::Idle,
             session,
             cached_auth: None, // REQ-001: Initialize as None, authenticate on first trade
+            warmed_tokens: HashSet::new(),
         })
     }
 
@@ -412,6 +415,96 @@ impl TradeExecutor {
         }
     }
 
+    /// Warm up the Polymarket SDK cache for crypto markets.
+    /// Pre-fetches tick_size and fee_rate for all token IDs to avoid
+    /// API calls during time-critical order building.
+    pub async fn warm_order_cache(&mut self) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        // Skip in dry-run mode (no CLOB client)
+        if self.config.dry_run {
+            info!("[CACHE] Skipping cache warmup in dry-run mode");
+            return Ok(());
+        }
+
+        // Fetch all crypto markets (filtered by configured assets)
+        let markets = repository::get_markets_with_fresh_orderbooks(
+            self.db.pool(),
+            self.config.max_orderbook_age_secs,
+            &self.config.assets,
+            self.config.max_time_to_expiry_secs,
+        )
+        .await?;
+
+        if markets.is_empty() {
+            info!("[CACHE] No crypto markets to warm up");
+            return Ok(());
+        }
+
+        // Authenticate to get CLOB client
+        let (clob_client, _) = self.ensure_authenticated().await?;
+
+        // Collect unique token IDs
+        let mut token_ids: Vec<&str> = Vec::with_capacity(markets.len() * 2);
+        for market in &markets {
+            token_ids.push(&market.yes_token_id);
+            token_ids.push(&market.no_token_id);
+        }
+
+        info!(
+            "[CACHE] Warming SDK cache for {} tokens ({} crypto markets)...",
+            token_ids.len(),
+            markets.len()
+        );
+
+        // Warm cache in parallel - all futures execute concurrently
+        let tick_futures: Vec<_> = token_ids
+            .iter()
+            .map(|token_id| clob_client.tick_size(token_id))
+            .collect();
+        let fee_futures: Vec<_> = token_ids
+            .iter()
+            .map(|token_id| clob_client.fee_rate_bps(token_id))
+            .collect();
+
+        // Execute ALL futures in parallel using join_all
+        let (tick_results, fee_results) = tokio::join!(
+            futures::future::join_all(tick_futures),
+            futures::future::join_all(fee_futures)
+        );
+
+        // Track successfully warmed tokens
+        let mut warmed_count = 0;
+        let mut failed_count = 0;
+        for (i, token_id) in token_ids.iter().enumerate() {
+            let tick_ok = tick_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+            let fee_ok = fee_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+            if tick_ok && fee_ok {
+                self.warmed_tokens.insert(token_id.to_string());
+                warmed_count += 1;
+            } else {
+                failed_count += 1;
+                if failed_count <= 5 {
+                    warn!("[CACHE] Failed to warm token {}: tick={}, fee={}",
+                        &token_id[..20.min(token_id.len())], tick_ok, fee_ok);
+                }
+            }
+        }
+        if failed_count > 5 {
+            warn!("[CACHE] ... and {} more failures", failed_count - 5);
+        }
+
+        let elapsed = start.elapsed();
+        info!(
+            "[CACHE] Startup warmup complete: {}/{} tokens warmed in {:?}",
+            warmed_count,
+            token_ids.len(),
+            elapsed
+        );
+
+        Ok(())
+    }
+
     /// Run a single trading cycle.
     pub async fn run_cycle(&mut self, verbose: bool) -> Result<CycleMetrics> {
         let cycle_start = std::time::Instant::now();
@@ -436,6 +529,77 @@ impl TradeExecutor {
             markets.len(),
             metrics.market_query_ms
         );
+
+        // Step 1b: Warm cache for any NEW tokens (not in warmed_tokens set)
+        if !self.config.dry_run {
+            let new_tokens: Vec<String> = markets
+                .iter()
+                .flat_map(|m| [m.yes_token_id.clone(), m.no_token_id.clone()])
+                .filter(|t| !self.warmed_tokens.contains(t))
+                .collect();
+
+            if !new_tokens.is_empty() {
+                if let Ok((clob_client, _)) = self.ensure_authenticated().await {
+                    info!("[CACHE] Warming {} new tokens in parallel...", new_tokens.len());
+                    let warm_start = std::time::Instant::now();
+
+                    // Create futures for parallel execution
+                    let tick_futures: Vec<_> = new_tokens
+                        .iter()
+                        .map(|t| clob_client.tick_size(t))
+                        .collect();
+                    let fee_futures: Vec<_> = new_tokens
+                        .iter()
+                        .map(|t| clob_client.fee_rate_bps(t))
+                        .collect();
+
+                    // Execute ALL in parallel
+                    let (tick_results, fee_results) = tokio::join!(
+                        futures::future::join_all(tick_futures),
+                        futures::future::join_all(fee_futures)
+                    );
+
+                    // Collect successfully warmed tokens
+                    let successfully_warmed: Vec<String> = new_tokens
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, token_id)| {
+                            let tick_ok = tick_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+                            let fee_ok = fee_results.get(i).map(|r| r.is_ok()).unwrap_or(false);
+                            if tick_ok && fee_ok {
+                                Some(token_id.clone())
+                            } else {
+                                warn!("[CACHE] Failed to warm token {}: tick={}, fee={}",
+                                    &token_id[..20.min(token_id.len())], tick_ok, fee_ok);
+                                None
+                            }
+                        })
+                        .collect();
+
+                    debug!(
+                        "[CACHE] {}/{} new tokens warmed in {:?}",
+                        successfully_warmed.len(),
+                        new_tokens.len(),
+                        warm_start.elapsed()
+                    );
+
+                    // Insert after clob_client scope ends
+                    for token_id in successfully_warmed {
+                        self.warmed_tokens.insert(token_id);
+                    }
+                }
+            }
+
+            // Memory safeguard: if set grows too large, clear it (SDK cache still exists)
+            const MAX_WARMED_TOKENS: usize = 10_000;
+            if self.warmed_tokens.len() > MAX_WARMED_TOKENS {
+                warn!(
+                    "[CACHE] warmed_tokens exceeded {} entries, clearing to prevent memory growth",
+                    MAX_WARMED_TOKENS
+                );
+                self.warmed_tokens.clear();
+            }
+        }
 
         // Step 2: Detect spread opportunities
         let detect_start = std::time::Instant::now();

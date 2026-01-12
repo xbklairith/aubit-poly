@@ -4905,6 +4905,7 @@ dependencies = [
  "clap",
  "common",
  "dotenvy",
+ "futures",
  "mockall",
  "polymarket-client-sdk",
  "reqwest",

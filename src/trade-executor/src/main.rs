@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::signal;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use common::{Config, Database};
@@ -151,6 +151,11 @@ async fn main() -> Result<()> {
 
     // Create executor
     let mut executor = TradeExecutor::new(exec_config.clone(), db).await?;
+
+    // Warm up SDK cache for crypto markets (avoids API calls during order building)
+    if let Err(e) = executor.warm_order_cache().await {
+        warn!("Failed to warm order cache: {}", e);
+    }
 
     // Print startup banner
     print_banner(&args, &exec_config);
