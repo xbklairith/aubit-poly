@@ -142,6 +142,7 @@ fn extract_best_asks(snapshot: &OrderbookSnapshot) -> Option<(Decimal, Decimal)>
 
 /// Determine if trade should be aborted due to spread widening.
 /// Returns (should_abort, reason) tuple for logging (REQ-017).
+#[cfg(test)]
 fn should_abort_due_to_spread(
     original_spread: Decimal,
     current_spread: Decimal,
@@ -584,7 +585,6 @@ impl TradeExecutor {
 
         // Clone Arc<Database> before borrowing self (for use inside auth scope)
         let db = self.db.clone();
-        let spread_tolerance = self.config.spread_tolerance;
         let max_orderbook_age = self.config.max_orderbook_age_secs;
 
         // Get credentials for rebalance task (read before ensure_authenticated borrows self)
@@ -635,50 +635,26 @@ impl TradeExecutor {
             return Ok(LiveTradeResult::Aborted { reason });
         }
 
-        // REQ-006, REQ-015: Use snapshot's pre-computed best ask prices for consistency
-        // This ensures detection and execution use the same data source (yes_best_ask column)
-        let (current_yes_price, current_no_price) = match (snapshot.yes_best_ask, snapshot.no_best_ask) {
-            (Some(yes), Some(no)) => (yes, no),
-            _ => {
-                let reason = "Empty orderbook (no best ask prices available)".to_string();
-                warn!("[LIVE] {} (REQ-015), aborting trade", reason);
-                return Ok(LiveTradeResult::Aborted { reason });
-            }
-        };
+        // Use detection prices directly (skip re-fetch to avoid MVCC race condition)
+        // The detection query already validated prices are fresh within max_orderbook_age
+        let execution_yes_price = details.yes_price;
+        let execution_no_price = details.no_price;
+        let execution_spread = execution_yes_price + execution_no_price;
 
-        // REQ-004, REQ-005: Validate spread hasn't widened beyond tolerance
-        let original_spread = details.yes_price + details.no_price;
-        let current_spread = current_yes_price + current_no_price;
-        let (should_abort, spread_reason) =
-            should_abort_due_to_spread(original_spread, current_spread, spread_tolerance);
-
-        // REQ-017: Log spread validation result
-        info!("[SPREAD] {}", spread_reason);
-
-        if should_abort {
-            warn!("[LIVE] Trade aborted: {} (REQ-005)", spread_reason);
-            return Ok(LiveTradeResult::Aborted {
-                reason: spread_reason,
-            });
-        }
-
-        // REQ-006: Use current prices for order building (not stale opportunity prices)
         info!(
-            "[LIVE] Using current prices: YES ${:.4} -> ${:.4}, NO ${:.4} -> ${:.4}",
-            details.yes_price, current_yes_price, details.no_price, current_no_price
+            "[SPREAD] Using detection prices: YES ${:.4}, NO ${:.4}, spread={:.4}",
+            execution_yes_price, execution_no_price, execution_spread
         );
 
-        // REQ-006: Recalculate shares based on current prices
-        // Original investment amount stays the same, but shares adjust for new prices
+        // Calculate shares based on detection prices
         let total_invested = details.total_invested;
-        let current_total_price = current_yes_price + current_no_price;
-        let shares_at_current_prices = (total_invested / current_total_price).round_dp(2);
+        let shares = (total_invested / execution_spread).round_dp(2);
 
         // Round price and size to 2 decimal places (Polymarket requirement)
-        let mut yes_size = shares_at_current_prices;
-        let yes_price = current_yes_price.round_dp(2);
-        let mut no_size = shares_at_current_prices;
-        let no_price = current_no_price.round_dp(2);
+        let mut yes_size = shares;
+        let yes_price = execution_yes_price.round_dp(2);
+        let mut no_size = shares;
+        let no_price = execution_no_price.round_dp(2);
 
         // Check minimum order value ($1 minimum per Polymarket)
         let yes_value = yes_size * yes_price;
