@@ -58,6 +58,10 @@ struct Args {
     /// Show profit & loss report
     #[arg(long)]
     pnl: bool,
+
+    /// Show all markets (no limit)
+    #[arg(long)]
+    all: bool,
 }
 
 #[tokio::main]
@@ -321,7 +325,8 @@ async fn main() -> Result<()> {
                         println!("\n{}", "-".repeat(50));
                         println!("By Market (most recent first):\n");
 
-                        for market in market_list.iter().take(15) {
+                        let display_limit = if args.all { market_list.len() } else { 15 };
+                        for market in market_list.iter().take(display_limit) {
                             let pnl = market.received - market.spent;
                             let sign = if pnl >= 0.0 { "+" } else { "" };
                             let title = if market.title.chars().count() > 45 {
@@ -336,8 +341,8 @@ async fn main() -> Result<()> {
                             );
                         }
 
-                        if market_list.len() > 15 {
-                            println!("\n  ... and {} more markets", market_list.len() - 15);
+                        if !args.all && market_list.len() > 15 {
+                            println!("\n  ... and {} more markets (use --all to show all)", market_list.len() - 15);
                         }
                     }
                 } else {
