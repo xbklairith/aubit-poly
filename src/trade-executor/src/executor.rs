@@ -123,6 +123,7 @@ fn parse_orderbook_side(json_value: &Option<serde_json::Value>) -> Vec<(Decimal,
 /// Extract best ask prices from orderbook snapshot.
 /// Returns (yes_best_ask, no_best_ask) or None if either side is empty.
 /// Implements REQ-006 (price consistency) and REQ-015 (empty orderbook handling).
+#[cfg(test)]
 fn extract_best_asks(snapshot: &OrderbookSnapshot) -> Option<(Decimal, Decimal)> {
     let yes_asks = parse_orderbook_side(&snapshot.yes_asks);
     let no_asks = parse_orderbook_side(&snapshot.no_asks);
@@ -634,11 +635,12 @@ impl TradeExecutor {
             return Ok(LiveTradeResult::Aborted { reason });
         }
 
-        // REQ-006, REQ-015: Extract current best ask prices
-        let (current_yes_price, current_no_price) = match extract_best_asks(&snapshot) {
-            Some(prices) => prices,
-            None => {
-                let reason = "Empty orderbook (no asks available)".to_string();
+        // REQ-006, REQ-015: Use snapshot's pre-computed best ask prices for consistency
+        // This ensures detection and execution use the same data source (yes_best_ask column)
+        let (current_yes_price, current_no_price) = match (snapshot.yes_best_ask, snapshot.no_best_ask) {
+            (Some(yes), Some(no)) => (yes, no),
+            _ => {
+                let reason = "Empty orderbook (no best ask prices available)".to_string();
                 warn!("[LIVE] {} (REQ-015), aborting trade", reason);
                 return Ok(LiveTradeResult::Aborted { reason });
             }
