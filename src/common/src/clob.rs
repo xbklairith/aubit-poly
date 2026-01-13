@@ -341,9 +341,10 @@ impl ClobClient {
                 .await
                 .map_err(ClobError::ConnectionError)?;
 
-            // Drain any pending messages (non-blocking)
-            loop {
-                match timeout(Duration::from_millis(10), ws.next()).await {
+            // Drain pending messages - limited to avoid blocking on busy markets
+            let batch_drain_deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+            while tokio::time::Instant::now() < batch_drain_deadline {
+                match timeout(Duration::from_millis(5), ws.next()).await {
                     Ok(Some(Ok(Message::Text(text)))) => {
                         buffered_messages.push(parse_message(&text));
                     }
@@ -352,7 +353,7 @@ impl ClobClient {
                             .await
                             .map_err(ClobError::ConnectionError)?;
                     }
-                    _ => break, // Timeout or other - continue to next batch
+                    _ => break, // No more messages available
                 }
             }
 
@@ -362,9 +363,10 @@ impl ClobClient {
             }
         }
 
-        // Final drain to catch any remaining messages
-        loop {
-            match timeout(Duration::from_millis(100), ws.next()).await {
+        // Final drain - time-limited to avoid infinite loop on busy markets
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < drain_deadline {
+            match timeout(Duration::from_millis(50), ws.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     buffered_messages.push(parse_message(&text));
                 }
@@ -373,7 +375,7 @@ impl ClobClient {
                         .await
                         .map_err(ClobError::ConnectionError)?;
                 }
-                _ => break,
+                _ => break, // No more messages available
             }
         }
 
