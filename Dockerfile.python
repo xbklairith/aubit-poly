@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install uv for fast dependency management
+RUN pip install uv
+
+# Copy dependency files and README (required by pyproject.toml)
+COPY pyproject.toml ./
+COPY uv.lock ./
+COPY README.md ./
+
+# Install dependencies
+RUN uv sync --frozen --no-dev
+
+# Copy application code
+COPY pylo/ ./pylo/
+COPY redeem.py ./
+
+# Default command
+CMD ["uv", "run", "python", "redeem.py", "--help"]

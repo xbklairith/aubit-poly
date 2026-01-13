@@ -31,6 +31,9 @@ dependencies = [
 
     # Async utilities
     "asyncio-throttle>=1.0.2",
+
+    # Blockchain (for position redemption)
+    "web3>=7.0.0",
 ]
 
 [project.optional-dependencies]

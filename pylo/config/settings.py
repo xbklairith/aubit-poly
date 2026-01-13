@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     polymarket_api_passphrase: SecretStr = SecretStr("")
     polymarket_wallet_address: str = ""
 
+    # Blockchain/Web3 (for position redemption)
+    wallet_private_key: SecretStr = SecretStr("")
+    polygon_rpc_url: str = "https://polygon-rpc.com"
+
     # Kalshi
     kalshi_api_key: SecretStr = SecretStr("")
     kalshi_api_secret: SecretStr = SecretStr("")
@@ -154,6 +158,11 @@ class Settings(BaseSettings):
         return bool(
             self.telegram_bot_token.get_secret_value() and self.telegram_chat_id
         )
+
+    @property
+    def has_web3_credentials(self) -> bool:
+        """Check if Web3/blockchain credentials are configured for redemption."""
+        return bool(self.wallet_private_key.get_secret_value())
 
 
 @lru_cache

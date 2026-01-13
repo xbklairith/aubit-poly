@@ -89,6 +89,18 @@ services:
     networks:
       - aubit-net
 
+  position-redeemer:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: position-redeemer
+    env_file:
+      - .env
+    command: ["sh", "-c", "while true; do echo '=== Checking for redeemable positions ===' && uv run python redeem.py --all --execute 2>&1 || true; echo '--- Sleeping 60s ---'; sleep 60; done"]
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
 networks:
   aubit-net:
     external: true
