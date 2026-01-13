@@ -47,6 +47,24 @@ use crate::balance::{
 /// Gamma Data API URL for balance queries
 const GAMMA_DATA_API_URL: &str = "https://data-api.polymarket.com";
 
+/// CLOB orderbook response for price fetching
+#[derive(serde::Deserialize)]
+struct ClobBook {
+    #[serde(default)]
+    bids: Vec<ClobLevel>,
+    #[serde(default)]
+    asks: Vec<ClobLevel>,
+}
+
+/// CLOB orderbook price level
+#[derive(serde::Deserialize)]
+struct ClobLevel {
+    price: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    size: String,
+}
+
 /// Calculate available liquidity from orderbook depth at best ask price.
 /// Returns the minimum USDC value available at best ask between YES and NO sides.
 /// (For spread arb, we need liquidity on BOTH sides - limited by the smaller one)
@@ -253,19 +271,6 @@ async fn fetch_and_log_live_orderbook(
     no_token_id: String,
     market_name: String,
 ) {
-    #[derive(serde::Deserialize)]
-    struct ClobBook {
-        bids: Vec<ClobLevel>,
-        asks: Vec<ClobLevel>,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ClobLevel {
-        price: String,
-        #[allow(dead_code)]
-        size: String,
-    }
-
     let yes_url = format!("{}/book?token_id={}", CLOB_HOST, yes_token_id);
     let no_url = format!("{}/book?token_id={}", CLOB_HOST, no_token_id);
 
@@ -279,10 +284,14 @@ async fn fetch_and_log_live_orderbook(
     let yes_prices = match yes_result {
         Ok(resp) => match resp.json::<ClobBook>().await {
             Ok(book) => {
-                let best_ask = book.asks.iter()
+                let best_ask = book
+                    .asks
+                    .iter()
                     .filter_map(|l| l.price.parse::<Decimal>().ok())
                     .min();
-                let best_bid = book.bids.iter()
+                let best_bid = book
+                    .bids
+                    .iter()
                     .filter_map(|l| l.price.parse::<Decimal>().ok())
                     .max();
                 Some((best_ask, best_bid))
@@ -296,10 +305,14 @@ async fn fetch_and_log_live_orderbook(
     let no_prices = match no_result {
         Ok(resp) => match resp.json::<ClobBook>().await {
             Ok(book) => {
-                let best_ask = book.asks.iter()
+                let best_ask = book
+                    .asks
+                    .iter()
                     .filter_map(|l| l.price.parse::<Decimal>().ok())
                     .min();
-                let best_bid = book.bids.iter()
+                let best_bid = book
+                    .bids
+                    .iter()
                     .filter_map(|l| l.price.parse::<Decimal>().ok())
                     .max();
                 Some((best_ask, best_bid))
@@ -324,7 +337,304 @@ async fn fetch_and_log_live_orderbook(
             );
         }
         _ => {
-            warn!("[API-DEPTH] {} | Failed to fetch live orderbook", short_name);
+            warn!(
+                "[API-DEPTH] {} | Failed to fetch live orderbook",
+                short_name
+            );
+        }
+    }
+}
+
+/// Fetch live best ask prices from CLOB REST API (blocking).
+/// Returns (yes_best_ask, no_best_ask) or None if fetch fails.
+/// Used for price mismatch detection before order placement.
+async fn fetch_live_clob_prices(
+    http_client: &reqwest::Client,
+    yes_token_id: &str,
+    no_token_id: &str,
+) -> Option<(Decimal, Decimal)> {
+    let yes_url = format!("{}/book?token_id={}", CLOB_HOST, yes_token_id);
+    let no_url = format!("{}/book?token_id={}", CLOB_HOST, no_token_id);
+
+    // Fetch both in parallel with timeout
+    let (yes_result, no_result) = tokio::join!(
+        timeout(Duration::from_secs(5), http_client.get(&yes_url).send()),
+        timeout(Duration::from_secs(5), http_client.get(&no_url).send()),
+    );
+
+    // Parse YES best ask
+    let yes_ask = match yes_result {
+        Ok(Ok(resp)) => match resp.json::<ClobBook>().await {
+            Ok(book) => book
+                .asks
+                .iter()
+                .filter_map(|l| l.price.parse::<Decimal>().ok())
+                .min(),
+            Err(e) => {
+                warn!("[LIVE-PRICE] Failed to parse YES orderbook: {:?}", e);
+                None
+            }
+        },
+        Ok(Err(e)) => {
+            warn!("[LIVE-PRICE] Failed to fetch YES orderbook: {:?}", e);
+            None
+        }
+        Err(_) => {
+            warn!("[LIVE-PRICE] YES orderbook fetch timed out");
+            None
+        }
+    }?;
+
+    // Parse NO best ask
+    let no_ask = match no_result {
+        Ok(Ok(resp)) => match resp.json::<ClobBook>().await {
+            Ok(book) => book
+                .asks
+                .iter()
+                .filter_map(|l| l.price.parse::<Decimal>().ok())
+                .min(),
+            Err(e) => {
+                warn!("[LIVE-PRICE] Failed to parse NO orderbook: {:?}", e);
+                None
+            }
+        },
+        Ok(Err(e)) => {
+            warn!("[LIVE-PRICE] Failed to fetch NO orderbook: {:?}", e);
+            None
+        }
+        Err(_) => {
+            warn!("[LIVE-PRICE] NO orderbook fetch timed out");
+            None
+        }
+    }?;
+
+    Some((yes_ask, no_ask))
+}
+
+/// Check if there's a price mismatch requiring sequential placement.
+/// Returns (has_mismatch, priority_side, yes_diff, no_diff).
+/// Priority side is the one with larger deviation (place first).
+fn check_price_mismatch(
+    detection_yes: Decimal,
+    detection_no: Decimal,
+    live_yes: Decimal,
+    live_no: Decimal,
+    threshold: Decimal,
+) -> (bool, OrderSide, Decimal, Decimal) {
+    let yes_diff = (detection_yes - live_yes).abs();
+    let no_diff = (detection_no - live_no).abs();
+
+    let yes_mismatch = yes_diff > threshold;
+    let no_mismatch = no_diff > threshold;
+    let has_mismatch = yes_mismatch || no_mismatch;
+
+    // Priority side is the one with larger deviation
+    // (more likely to have stale data, so discover true price first)
+    let priority = if yes_diff >= no_diff {
+        OrderSide::Yes
+    } else {
+        OrderSide::No
+    };
+
+    (has_mismatch, priority, yes_diff, no_diff)
+}
+
+/// Poll an order until it's filled or timeout.
+/// Returns the final fill status:
+/// - `FullyFilled(amount)` if order filled completely
+/// - `PartialFill(amount)` if timeout with some fill
+/// - `Timeout` if timeout with no fill
+/// - `Error(msg)` if persistent API failures
+async fn poll_order_fill(
+    clob_client: &AuthenticatedClobClient,
+    order_id: &str,
+    target_size: Decimal,
+    poll_interval_ms: u64,
+    poll_timeout_secs: u64,
+) -> PollResult {
+    let start = std::time::Instant::now();
+    // Guard against division by zero
+    let max_iterations = if poll_interval_ms > 0 {
+        (poll_timeout_secs * 1000 / poll_interval_ms) as u32 + 1
+    } else {
+        1 // Fallback to single iteration if interval is 0
+    };
+
+    let mut last_known_fill = Decimal::ZERO;
+    let mut consecutive_errors = 0u32;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
+    for iteration in 1..=max_iterations {
+        // Check timeout
+        if start.elapsed() > Duration::from_secs(poll_timeout_secs) {
+            info!("[POLL] Timeout reached after {}s", poll_timeout_secs);
+            break;
+        }
+
+        // Query order status
+        match timeout(
+            Duration::from_secs(CANCEL_TIMEOUT_SECS),
+            clob_client.order(order_id),
+        )
+        .await
+        {
+            Ok(Ok(order_info)) => {
+                consecutive_errors = 0; // Reset on success
+                let filled = order_info.size_matched;
+                last_known_fill = filled;
+
+                if filled >= target_size {
+                    info!(
+                        "[POLL] Order {} fully filled: {}/{}",
+                        order_id, filled, target_size
+                    );
+                    return PollResult::FullyFilled(filled);
+                }
+                // Check if order status indicates completion (handle SDK enum)
+                let status_str = format!("{:?}", order_info.status);
+                if status_str.contains("Matched") || status_str.contains("MATCHED") {
+                    info!(
+                        "[POLL] Order {} status {:?}: {}/{}",
+                        order_id, order_info.status, filled, target_size
+                    );
+                    return PollResult::FullyFilled(filled);
+                }
+                if filled > Decimal::ZERO {
+                    info!(
+                        "[POLL] Iteration {}: order {} partial fill {}/{}, status={:?}",
+                        iteration, order_id, filled, target_size, order_info.status
+                    );
+                } else {
+                    debug!(
+                        "[POLL] Iteration {}: order {} unfilled, status={:?}",
+                        iteration, order_id, order_info.status
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                consecutive_errors += 1;
+                warn!(
+                    "[POLL] Failed to query order {} (error {}/{}): {:?}",
+                    order_id, consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                );
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return PollResult::Error(format!(
+                        "Failed to query order after {} attempts: {:?}",
+                        MAX_CONSECUTIVE_ERRORS, e
+                    ));
+                }
+            }
+            Err(_) => {
+                consecutive_errors += 1;
+                warn!(
+                    "[POLL] Query timeout for order {} (error {}/{})",
+                    order_id, consecutive_errors, MAX_CONSECUTIVE_ERRORS
+                );
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return PollResult::Error(format!(
+                        "Order query timed out {} times consecutively",
+                        MAX_CONSECUTIVE_ERRORS
+                    ));
+                }
+            }
+        }
+
+        // Wait before next poll
+        tokio::time::sleep(Duration::from_millis(poll_interval_ms)).await;
+    }
+
+    // Timeout reached - query final fill amount
+    let final_fill = query_order_fill(clob_client, order_id).await;
+    if final_fill > Decimal::ZERO {
+        info!(
+            "[POLL] Timeout with partial fill: {}/{}",
+            final_fill, target_size
+        );
+        PollResult::PartialFill(final_fill)
+    } else if last_known_fill > Decimal::ZERO {
+        // Use last known if final query failed
+        info!(
+            "[POLL] Timeout with partial fill (last known): {}/{}",
+            last_known_fill, target_size
+        );
+        PollResult::PartialFill(last_known_fill)
+    } else {
+        info!("[POLL] Timeout with no fill");
+        PollResult::Timeout
+    }
+}
+
+/// Cancel an order with retry logic.
+/// Returns true if cancel succeeded, false otherwise.
+async fn cancel_order_with_retries(
+    clob_client: &AuthenticatedClobClient,
+    order_id: &str,
+    tag: &str,
+) -> bool {
+    for attempt in 1..=CANCEL_MAX_RETRIES {
+        match timeout(
+            Duration::from_secs(CANCEL_TIMEOUT_SECS),
+            clob_client.cancel_order(order_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!(
+                    "[SEQUENTIAL] Cancelled {} order {} on attempt {}",
+                    tag, order_id, attempt
+                );
+                return true;
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "[SEQUENTIAL] Cancel {} failed (attempt {}): {:?}",
+                    tag, attempt, e
+                );
+            }
+            Err(_) => {
+                warn!("[SEQUENTIAL] Cancel {} timeout (attempt {})", tag, attempt);
+            }
+        }
+        if attempt == CANCEL_MAX_RETRIES {
+            error!(
+                "[SEQUENTIAL] CRITICAL: Failed to cancel {} order {} after {} attempts. ORPHANED ORDER!",
+                tag, order_id, CANCEL_MAX_RETRIES
+            );
+        } else {
+            tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS)).await;
+        }
+    }
+    false
+}
+
+/// Query the final fill amount for an order after cancellation.
+async fn query_order_fill(clob_client: &AuthenticatedClobClient, order_id: &str) -> Decimal {
+    match timeout(
+        Duration::from_secs(CANCEL_TIMEOUT_SECS),
+        clob_client.order(order_id),
+    )
+    .await
+    {
+        Ok(Ok(order_info)) => {
+            info!(
+                "[SEQUENTIAL] Order {} final fill: {}",
+                order_id, order_info.size_matched
+            );
+            order_info.size_matched
+        }
+        Ok(Err(e)) => {
+            warn!(
+                "[SEQUENTIAL] Failed to query order {}: {:?}, assuming 0 fill",
+                order_id, e
+            );
+            Decimal::ZERO
+        }
+        Err(_) => {
+            warn!(
+                "[SEQUENTIAL] Query timeout for order {}, assuming 0 fill",
+                order_id
+            );
+            Decimal::ZERO
         }
     }
 }
@@ -333,7 +643,8 @@ use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
 use crate::metrics::{CycleMetrics, MarketSummary};
 use crate::models::{
-    BotState, LiveTradeResult, PositionCache, SessionState, SpreadOpportunity, TradeDetails,
+    BotState, LiveTradeResult, OrderSide, PollResult, PositionCache, SessionState,
+    SpreadOpportunity, TradeDetails,
 };
 
 use chrono::DateTime;
@@ -575,7 +886,10 @@ impl TradeExecutor {
             }
         }
         if failed_count > 0 {
-            debug!("[CACHE] {} tokens failed to warm (invalid/expired)", failed_count);
+            debug!(
+                "[CACHE] {} tokens failed to warm (invalid/expired)",
+                failed_count
+            );
         }
 
         let elapsed = start.elapsed();
@@ -663,16 +977,27 @@ impl TradeExecutor {
                     }
 
                     if fail_count > 0 {
-                        debug!("[CACHE] {}/{} tokens warmed ({} failed) in {:?}",
-                            success_count, new_tokens.len(), fail_count, warm_start.elapsed());
+                        debug!(
+                            "[CACHE] {}/{} tokens warmed ({} failed) in {:?}",
+                            success_count,
+                            new_tokens.len(),
+                            fail_count,
+                            warm_start.elapsed()
+                        );
                     } else {
-                        debug!("[CACHE] {} tokens warmed in {:?}",
-                            success_count, warm_start.elapsed());
+                        debug!(
+                            "[CACHE] {} tokens warmed in {:?}",
+                            success_count,
+                            warm_start.elapsed()
+                        );
                     }
                 }
             } else if new_tokens.len() > MAX_INCREMENTAL_TOKENS {
-                debug!("[CACHE] Skipping incremental warmup ({} tokens > {} limit)",
-                    new_tokens.len(), MAX_INCREMENTAL_TOKENS);
+                debug!(
+                    "[CACHE] Skipping incremental warmup ({} tokens > {} limit)",
+                    new_tokens.len(),
+                    MAX_INCREMENTAL_TOKENS
+                );
             }
 
             // Memory safeguard: if set grows too large, clear it (SDK cache still exists)
@@ -836,6 +1161,13 @@ impl TradeExecutor {
         let db = self.db.clone();
         let max_orderbook_age = self.config.max_orderbook_age_secs;
         let http_client_for_api = self.http_client.clone();
+        let http_client_for_mismatch = self.http_client.clone();
+
+        // Capture sequential placement config before mutable borrow
+        let enable_sequential_placement = self.config.enable_sequential_placement;
+        let price_mismatch_threshold = self.config.price_mismatch_threshold;
+        let sequential_poll_interval_ms = self.config.sequential_poll_interval_ms;
+        let sequential_poll_timeout_secs = self.config.sequential_poll_timeout_secs;
 
         // Get credentials for rebalance task (read before ensure_authenticated borrows self)
         let private_key = std::env::var("WALLET_PRIVATE_KEY")
@@ -972,13 +1304,68 @@ impl TradeExecutor {
         // This ensures the depth display matches the prices used for orders
         log_market_depth(&snapshot, &opportunity.market_name, 5);
 
-        // Spawn non-blocking API fetch to compare DB prices with live API
-        let yes_token = opportunity.yes_token_id.clone();
-        let no_token = opportunity.no_token_id.clone();
-        let market_name_clone = opportunity.market_name.clone();
-        tokio::spawn(async move {
-            fetch_and_log_live_orderbook(http_client_for_api, yes_token, no_token, market_name_clone).await;
-        });
+        // Check for price mismatch (blocking fetch) to determine order placement mode
+        // Only check for both-sides trades where sequential placement makes sense
+        let use_sequential_placement: Option<(OrderSide, Decimal, Decimal)> = if single_side_only
+            .is_none()
+            && enable_sequential_placement
+        {
+            match fetch_live_clob_prices(
+                &http_client_for_mismatch,
+                &opportunity.yes_token_id,
+                &opportunity.no_token_id,
+            )
+            .await
+            {
+                Some((live_yes, live_no)) => {
+                    let (has_mismatch, priority_side, yes_diff, no_diff) = check_price_mismatch(
+                        yes_price,
+                        no_price,
+                        live_yes,
+                        live_no,
+                        price_mismatch_threshold,
+                    );
+
+                    if has_mismatch {
+                        warn!(
+                                "[MISMATCH] Prices differ from live CLOB! YES: detection={} live={} (diff={}), NO: detection={} live={} (diff={})",
+                                yes_price, live_yes, yes_diff, no_price, live_no, no_diff
+                            );
+                        info!(
+                                "[SEQUENTIAL] Using sequential placement, priority side: {:?}, live prices: YES=${}, NO=${}",
+                                priority_side, live_yes, live_no
+                            );
+                        Some((priority_side, live_yes, live_no))
+                    } else {
+                        info!(
+                                "[LIVE] Prices match live CLOB (within threshold), using simultaneous placement"
+                            );
+                        // Spawn non-blocking API fetch for audit logging
+                        let yes_token = opportunity.yes_token_id.clone();
+                        let no_token = opportunity.no_token_id.clone();
+                        let market_name_clone = opportunity.market_name.clone();
+                        let http_client_clone = http_client_for_api.clone();
+                        tokio::spawn(async move {
+                            fetch_and_log_live_orderbook(
+                                http_client_clone,
+                                yes_token,
+                                no_token,
+                                market_name_clone,
+                            )
+                            .await;
+                        });
+                        None
+                    }
+                }
+                None => {
+                    warn!("[LIVE] Could not fetch live prices, falling back to simultaneous placement");
+                    None
+                }
+            }
+        } else {
+            // Single-sided trade or sequential disabled
+            None
+        };
 
         // Execute orders based on trade mode
         let (yes_order_id, yes_filled, no_order_id, no_filled): (
@@ -1090,153 +1477,601 @@ impl TradeExecutor {
                 (None, dec!(0), order_id, filled)
             }
             _ => {
-                // Both sides - original spread arb logic
-                let (yes_order, no_order) =
-                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
-                        tokio::try_join!(
-                            async {
-                                clob_client
-                                    .limit_order()
-                                    .token_id(&opportunity.yes_token_id)
-                                    .size(yes_size)
-                                    .price(yes_price)
-                                    .side(polymarket_client_sdk::clob::types::Side::Buy)
-                                    .build()
-                                    .await
-                                    .context("Failed to build YES order")
-                            },
-                            async {
-                                clob_client
-                                    .limit_order()
-                                    .token_id(&opportunity.no_token_id)
-                                    .size(no_size)
-                                    .price(no_price)
-                                    .side(polymarket_client_sdk::clob::types::Side::Buy)
-                                    .build()
-                                    .await
-                                    .context("Failed to build NO order")
-                            }
-                        )
-                    })
-                    .await
-                    .context("Order building timed out")??;
-
-                let (yes_signed, no_signed) =
-                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
-                        tokio::try_join!(
-                            clob_client.sign(&signer, yes_order),
-                            clob_client.sign(&signer, no_order)
-                        )
-                    })
-                    .await
-                    .context("Order signing timed out")?
-                    .context("Failed to sign orders")?;
-
-                info!("[LIVE] Posting YES and NO orders simultaneously...");
-                let (yes_result, no_result) =
-                    timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
-                        tokio::try_join!(
-                            clob_client.post_order(yes_signed),
-                            clob_client.post_order(no_signed)
-                        )
-                    })
-                    .await
-                    .context("Order posting timed out")?
-                    .context("Failed to post orders")?;
-
-                info!("[LIVE] YES order result: {:?}", yes_result);
-                info!("[LIVE] NO order result: {:?}", no_result);
-
-                let (yes_id, yes_f, yes_err) = extract_order_info(&yes_result).unwrap_or((
-                    None,
-                    dec!(0),
-                    Some("No response".to_string()),
-                ));
-                let (no_id, no_f, no_err) = extract_order_info(&no_result).unwrap_or((
-                    None,
-                    dec!(0),
-                    Some("No response".to_string()),
-                ));
-
-                let yes_failed = yes_id.is_none();
-                let no_failed = no_id.is_none();
-
-                if yes_failed && no_failed {
-                    let reason =
-                        format!("Both orders failed - YES: {:?}, NO: {:?}", yes_err, no_err);
-                    error!("[LIVE] {}", reason);
-                    return Ok(LiveTradeResult::Aborted { reason });
-                }
-
-                // If only one failed, cancel the other with retries
-                if yes_failed || no_failed {
-                    warn!("[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.", yes_err, no_err);
-
-                    if let Some(ref order_id) = yes_id {
-                        for attempt in 1..=CANCEL_MAX_RETRIES {
-                            match timeout(
-                                Duration::from_secs(CANCEL_TIMEOUT_SECS),
-                                clob_client.cancel_order(order_id),
-                            )
-                            .await
-                            {
-                                Ok(Ok(_)) => {
-                                    info!(
-                                        "[LIVE] Cancelled YES order {} on attempt {}",
-                                        order_id, attempt
-                                    );
-                                    break;
-                                }
-                                Ok(Err(e)) => {
-                                    warn!("[LIVE] Cancel YES failed (attempt {}): {:?}", attempt, e)
-                                }
-                                Err(_) => warn!("[LIVE] Cancel YES timeout (attempt {})", attempt),
-                            }
-                            if attempt == CANCEL_MAX_RETRIES {
-                                error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS))
-                                    .await;
-                            }
-                        }
-                    }
-
-                    if let Some(ref order_id) = no_id {
-                        for attempt in 1..=CANCEL_MAX_RETRIES {
-                            match timeout(
-                                Duration::from_secs(CANCEL_TIMEOUT_SECS),
-                                clob_client.cancel_order(order_id),
-                            )
-                            .await
-                            {
-                                Ok(Ok(_)) => {
-                                    info!(
-                                        "[LIVE] Cancelled NO order {} on attempt {}",
-                                        order_id, attempt
-                                    );
-                                    break;
-                                }
-                                Ok(Err(e)) => {
-                                    warn!("[LIVE] Cancel NO failed (attempt {}): {:?}", attempt, e)
-                                }
-                                Err(_) => warn!("[LIVE] Cancel NO timeout (attempt {})", attempt),
-                            }
-                            if attempt == CANCEL_MAX_RETRIES {
-                                error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(CANCEL_RETRY_DELAY_MS))
-                                    .await;
-                            }
-                        }
-                    }
-                    let reason = format!(
-                        "Partial order failure (cancelled other side) - YES: {:?}, NO: {:?}",
-                        yes_err, no_err
+                // Both sides - check if we should use sequential or simultaneous placement
+                if let Some((priority_side, live_yes_price, live_no_price)) =
+                    use_sequential_placement
+                {
+                    // ==========================================
+                    // SEQUENTIAL PLACEMENT (price mismatch detected)
+                    // ==========================================
+                    info!(
+                        "[SEQUENTIAL] Starting sequential placement, priority: {:?}",
+                        priority_side
                     );
-                    return Ok(LiveTradeResult::Aborted { reason });
-                }
 
-                (yes_id, yes_f, no_id, no_f)
+                    // Determine first and second order parameters based on priority
+                    let (
+                        first_token_id,
+                        first_size,
+                        first_price,
+                        first_tag,
+                        second_token_id,
+                        second_size,
+                        second_price,
+                        second_tag,
+                    ) = match priority_side {
+                        OrderSide::Yes => (
+                            &opportunity.yes_token_id,
+                            yes_size,
+                            live_yes_price, // Use live price!
+                            "YES",
+                            &opportunity.no_token_id,
+                            no_size,
+                            live_no_price,
+                            "NO",
+                        ),
+                        OrderSide::No => (
+                            &opportunity.no_token_id,
+                            no_size,
+                            live_no_price, // Use live price!
+                            "NO",
+                            &opportunity.yes_token_id,
+                            yes_size,
+                            live_yes_price,
+                            "YES",
+                        ),
+                    };
+
+                    // === PHASE 1: Place first (priority) order ===
+                    info!(
+                        "[SEQUENTIAL] Phase 1: Placing {} order: {} @ ${}",
+                        first_tag, first_size, first_price
+                    );
+
+                    let first_order = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client
+                            .limit_order()
+                            .token_id(first_token_id)
+                            .size(first_size)
+                            .price(first_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build(),
+                    )
+                    .await
+                    .context("First order building timed out")?
+                    .context("Failed to build first order")?;
+
+                    let first_signed = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.sign(&signer, first_order),
+                    )
+                    .await
+                    .context("First order signing timed out")?
+                    .context("Failed to sign first order")?;
+
+                    let first_result = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.post_order(first_signed),
+                    )
+                    .await
+                    .context("First order posting timed out")?
+                    .context("Failed to post first order")?;
+
+                    info!(
+                        "[SEQUENTIAL] {} order result: {:?}",
+                        first_tag, first_result
+                    );
+
+                    let (first_order_id, first_immediate_fill, first_err) = extract_order_info(
+                        &first_result,
+                    )
+                    .unwrap_or((None, dec!(0), Some("No response".to_string())));
+
+                    // Check if first order failed
+                    if first_order_id.is_none() {
+                        let reason = format!(
+                            "[SEQUENTIAL] First {} order failed: {:?} - aborting (no exposure)",
+                            first_tag, first_err
+                        );
+                        error!("{}", reason);
+                        return Ok(LiveTradeResult::Aborted { reason });
+                    }
+
+                    let first_order_id_str = first_order_id.clone().unwrap();
+
+                    // === PHASE 2: Check first order fill status ===
+                    let first_filled = if first_immediate_fill >= first_size {
+                        info!(
+                            "[SEQUENTIAL] {} order filled immediately: {}",
+                            first_tag, first_immediate_fill
+                        );
+                        first_immediate_fill
+                    } else {
+                        // Order is live, need to poll
+                        info!(
+                            "[SEQUENTIAL] {} order live (filled {}/{}), polling for fill...",
+                            first_tag, first_immediate_fill, first_size
+                        );
+
+                        let poll_result = poll_order_fill(
+                            clob_client,
+                            &first_order_id_str,
+                            first_size,
+                            sequential_poll_interval_ms,
+                            sequential_poll_timeout_secs,
+                        )
+                        .await;
+
+                        match poll_result {
+                            PollResult::FullyFilled(filled) => {
+                                info!(
+                                    "[SEQUENTIAL] {} order fully filled after polling: {}",
+                                    first_tag, filled
+                                );
+                                filled
+                            }
+                            PollResult::PartialFill(filled) => {
+                                warn!(
+                                    "[SEQUENTIAL] {} order partial fill: {}/{}",
+                                    first_tag, filled, first_size
+                                );
+                                filled
+                            }
+                            PollResult::Timeout | PollResult::Error(_) => {
+                                // Cancel and check final fill
+                                info!("[SEQUENTIAL] {} order timeout, cancelling...", first_tag);
+                                cancel_order_with_retries(
+                                    clob_client,
+                                    &first_order_id_str,
+                                    first_tag,
+                                )
+                                .await;
+                                let final_fill =
+                                    query_order_fill(clob_client, &first_order_id_str).await;
+
+                                if final_fill == Decimal::ZERO {
+                                    info!("[SEQUENTIAL] No fill after timeout, aborting (no loss)");
+                                    return Ok(LiveTradeResult::Aborted {
+                                        reason: format!(
+                                            "First {} order unfilled after {}s timeout - clean abort",
+                                            first_tag, sequential_poll_timeout_secs
+                                        ),
+                                    });
+                                }
+                                info!(
+                                    "[SEQUENTIAL] {} order had partial fill: {}",
+                                    first_tag, final_fill
+                                );
+                                final_fill
+                            }
+                        }
+                    };
+
+                    // === PHASE 3: Place second order ===
+                    // Adjust size based on first order fill
+                    let adjusted_second_size = if first_filled < first_size {
+                        // Partial fill on first order - match with second to balance
+                        first_filled.min(second_size)
+                    } else {
+                        second_size
+                    };
+
+                    // Guard: Skip second order if adjusted size is zero
+                    if adjusted_second_size == Decimal::ZERO {
+                        warn!("[SEQUENTIAL] Adjusted second order size is zero, aborting trade");
+                        // This shouldn't happen since we already guard for zero first_fill
+                        // but if it does, abort cleanly
+                        return Ok(LiveTradeResult::Aborted {
+                            reason: format!(
+                                "Second order size would be zero after {} order filled {}",
+                                first_tag, first_filled
+                            ),
+                        });
+                    }
+
+                    info!(
+                        "[SEQUENTIAL] Phase 3: Placing {} order: {} @ ${} (adjusted from {})",
+                        second_tag, adjusted_second_size, second_price, second_size
+                    );
+
+                    let second_order = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client
+                            .limit_order()
+                            .token_id(second_token_id)
+                            .size(adjusted_second_size)
+                            .price(second_price)
+                            .side(polymarket_client_sdk::clob::types::Side::Buy)
+                            .build(),
+                    )
+                    .await
+                    .context("Second order building timed out")?
+                    .context("Failed to build second order")?;
+
+                    let second_signed = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.sign(&signer, second_order),
+                    )
+                    .await
+                    .context("Second order signing timed out")?
+                    .context("Failed to sign second order")?;
+
+                    let second_result = timeout(
+                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                        clob_client.post_order(second_signed),
+                    )
+                    .await
+                    .context("Second order posting timed out")?
+                    .context("Failed to post second order")?;
+
+                    info!(
+                        "[SEQUENTIAL] {} order result: {:?}",
+                        second_tag, second_result
+                    );
+
+                    let (second_order_id, second_immediate_fill, second_err) = extract_order_info(
+                        &second_result,
+                    )
+                    .unwrap_or((None, dec!(0), Some("No response".to_string())));
+
+                    // Check if second order failed
+                    let second_filled = if second_order_id.is_none() {
+                        error!(
+                            "[SEQUENTIAL] Second {} order failed: {:?}",
+                            second_tag, second_err
+                        );
+
+                        // Recovery: Market sell first order's fill to prevent imbalance
+                        let recovery_status = if first_filled > Decimal::ZERO {
+                            warn!(
+                                "[SEQUENTIAL] Initiating recovery sell of {} {} shares",
+                                first_filled, first_tag
+                            );
+
+                            // Convert Decimal to Amount type
+                            let sell_amount =
+                                match polymarket_client_sdk::clob::types::Amount::shares(
+                                    first_filled,
+                                ) {
+                                    Ok(a) => a,
+                                    Err(e) => {
+                                        error!(
+                                            "[SEQUENTIAL] CRITICAL: Failed to create Amount from {}: {:?}. MANUAL INTERVENTION REQUIRED!",
+                                            first_filled, e
+                                        );
+                                        return Ok(LiveTradeResult::Aborted {
+                                            reason: format!(
+                                            "IMBALANCED POSITION: {} {} shares held. Recovery sell failed: couldn't create Amount. MANUAL SELL REQUIRED!",
+                                            first_filled, first_tag
+                                        ),
+                                        });
+                                    }
+                                };
+
+                            // Attempt market sell with FOK (Fill-or-Kill)
+                            // Track success/failure for clear reporting
+                            let mut sell_succeeded = false;
+                            let mut sell_error: Option<String> = None;
+
+                            match timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                clob_client
+                                    .market_order()
+                                    .token_id(first_token_id)
+                                    .amount(sell_amount)
+                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                    .order_type(OrderType::FOK)
+                                    .build(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(sell_order)) => {
+                                    match timeout(
+                                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                        clob_client.sign(&signer, sell_order),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(signed_sell)) => {
+                                            match timeout(
+                                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                                clob_client.post_order(signed_sell),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(sell_result)) => {
+                                                    // Check if the order was accepted
+                                                    let (sell_order_id, sell_filled, _) =
+                                                        extract_order_info(&sell_result)
+                                                            .unwrap_or((None, dec!(0), None));
+                                                    if sell_order_id.is_some() {
+                                                        info!(
+                                                            "[SEQUENTIAL] Recovery sell SUCCEEDED: sold {} shares",
+                                                            sell_filled
+                                                        );
+                                                        sell_succeeded = true;
+                                                    } else {
+                                                        sell_error = Some("Order rejected".to_string());
+                                                        error!(
+                                                            "[SEQUENTIAL] Recovery sell REJECTED: {:?}",
+                                                            sell_result
+                                                        );
+                                                    }
+                                                }
+                                                Ok(Err(e)) => {
+                                                    sell_error = Some(format!("Post failed: {:?}", e));
+                                                    error!(
+                                                        "[SEQUENTIAL] Recovery sell post failed: {:?}",
+                                                        e
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    sell_error = Some("Post timed out".to_string());
+                                                    error!(
+                                                        "[SEQUENTIAL] Recovery sell post timed out"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(Err(e)) => {
+                                            sell_error = Some(format!("Sign failed: {:?}", e));
+                                            error!(
+                                                "[SEQUENTIAL] Recovery sell sign failed: {:?}",
+                                                e
+                                            );
+                                        }
+                                        Err(_) => {
+                                            sell_error = Some("Sign timed out".to_string());
+                                            error!("[SEQUENTIAL] Recovery sell sign timed out");
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    sell_error = Some(format!("Build failed: {:?}", e));
+                                    error!("[SEQUENTIAL] Recovery sell build failed: {:?}", e);
+                                }
+                                Err(_) => {
+                                    sell_error = Some("Build timed out".to_string());
+                                    error!("[SEQUENTIAL] Recovery sell build timed out");
+                                }
+                            }
+
+                            // Return clear status
+                            if sell_succeeded {
+                                "recovery sell SUCCEEDED - position rebalanced"
+                            } else {
+                                error!(
+                                    "[SEQUENTIAL] CRITICAL: Recovery sell FAILED ({}). {} {} shares may remain! MANUAL INTERVENTION REQUIRED!",
+                                    sell_error.as_deref().unwrap_or("unknown"),
+                                    first_filled,
+                                    first_tag
+                                );
+                                "recovery sell FAILED - MANUAL INTERVENTION REQUIRED"
+                            }
+                        } else {
+                            "no recovery needed (zero fill)"
+                        };
+
+                        // Return aborted with clear recovery status
+                        return Ok(LiveTradeResult::Aborted {
+                            reason: format!(
+                                "Second {} order failed after first {} filled {} - {}",
+                                second_tag, first_tag, first_filled, recovery_status
+                            ),
+                        });
+                    } else if second_immediate_fill >= adjusted_second_size {
+                        info!(
+                            "[SEQUENTIAL] {} order filled immediately: {}",
+                            second_tag, second_immediate_fill
+                        );
+                        second_immediate_fill
+                    } else {
+                        // Second order is live, poll for fill
+                        let second_order_id_str = second_order_id.clone().unwrap();
+                        info!(
+                            "[SEQUENTIAL] {} order live (filled {}/{}), polling...",
+                            second_tag, second_immediate_fill, adjusted_second_size
+                        );
+
+                        let poll_result = poll_order_fill(
+                            clob_client,
+                            &second_order_id_str,
+                            adjusted_second_size,
+                            sequential_poll_interval_ms,
+                            sequential_poll_timeout_secs,
+                        )
+                        .await;
+
+                        match poll_result {
+                            PollResult::FullyFilled(filled) => filled,
+                            PollResult::PartialFill(filled) => filled,
+                            PollResult::Timeout | PollResult::Error(_) => {
+                                cancel_order_with_retries(
+                                    clob_client,
+                                    &second_order_id_str,
+                                    second_tag,
+                                )
+                                .await;
+                                query_order_fill(clob_client, &second_order_id_str).await
+                            }
+                        }
+                    };
+
+                    // Return results in correct order (YES, NO)
+                    match priority_side {
+                        OrderSide::Yes => {
+                            (first_order_id, first_filled, second_order_id, second_filled)
+                        }
+                        OrderSide::No => {
+                            (second_order_id, second_filled, first_order_id, first_filled)
+                        }
+                    }
+                } else {
+                    // ==========================================
+                    // SIMULTANEOUS PLACEMENT (no mismatch or fallback)
+                    // ==========================================
+                    let (yes_order, no_order) =
+                        timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                            tokio::try_join!(
+                                async {
+                                    clob_client
+                                        .limit_order()
+                                        .token_id(&opportunity.yes_token_id)
+                                        .size(yes_size)
+                                        .price(yes_price)
+                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                        .build()
+                                        .await
+                                        .context("Failed to build YES order")
+                                },
+                                async {
+                                    clob_client
+                                        .limit_order()
+                                        .token_id(&opportunity.no_token_id)
+                                        .size(no_size)
+                                        .price(no_price)
+                                        .side(polymarket_client_sdk::clob::types::Side::Buy)
+                                        .build()
+                                        .await
+                                        .context("Failed to build NO order")
+                                }
+                            )
+                        })
+                        .await
+                        .context("Order building timed out")??;
+
+                    let (yes_signed, no_signed) =
+                        timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                            tokio::try_join!(
+                                clob_client.sign(&signer, yes_order),
+                                clob_client.sign(&signer, no_order)
+                            )
+                        })
+                        .await
+                        .context("Order signing timed out")?
+                        .context("Failed to sign orders")?;
+
+                    info!("[LIVE] Posting YES and NO orders simultaneously...");
+                    let (yes_result, no_result) =
+                        timeout(Duration::from_secs(ORDER_TIMEOUT_SECS), async {
+                            tokio::try_join!(
+                                clob_client.post_order(yes_signed),
+                                clob_client.post_order(no_signed)
+                            )
+                        })
+                        .await
+                        .context("Order posting timed out")?
+                        .context("Failed to post orders")?;
+
+                    info!("[LIVE] YES order result: {:?}", yes_result);
+                    info!("[LIVE] NO order result: {:?}", no_result);
+
+                    let (yes_id, yes_f, yes_err) = extract_order_info(&yes_result).unwrap_or((
+                        None,
+                        dec!(0),
+                        Some("No response".to_string()),
+                    ));
+                    let (no_id, no_f, no_err) = extract_order_info(&no_result).unwrap_or((
+                        None,
+                        dec!(0),
+                        Some("No response".to_string()),
+                    ));
+
+                    let yes_failed = yes_id.is_none();
+                    let no_failed = no_id.is_none();
+
+                    if yes_failed && no_failed {
+                        let reason =
+                            format!("Both orders failed - YES: {:?}, NO: {:?}", yes_err, no_err);
+                        error!("[LIVE] {}", reason);
+                        return Ok(LiveTradeResult::Aborted { reason });
+                    }
+
+                    // If only one failed, cancel the other with retries
+                    if yes_failed || no_failed {
+                        warn!("[LIVE] Partial failure - YES: {:?}, NO: {:?}. Cancelling successful order.", yes_err, no_err);
+
+                        if let Some(ref order_id) = yes_id {
+                            for attempt in 1..=CANCEL_MAX_RETRIES {
+                                match timeout(
+                                    Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                                    clob_client.cancel_order(order_id),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {
+                                        info!(
+                                            "[LIVE] Cancelled YES order {} on attempt {}",
+                                            order_id, attempt
+                                        );
+                                        break;
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!(
+                                            "[LIVE] Cancel YES failed (attempt {}): {:?}",
+                                            attempt, e
+                                        )
+                                    }
+                                    Err(_) => {
+                                        warn!("[LIVE] Cancel YES timeout (attempt {})", attempt)
+                                    }
+                                }
+                                if attempt == CANCEL_MAX_RETRIES {
+                                    error!("[LIVE] CRITICAL: Failed to cancel YES order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(
+                                        CANCEL_RETRY_DELAY_MS,
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
+
+                        if let Some(ref order_id) = no_id {
+                            for attempt in 1..=CANCEL_MAX_RETRIES {
+                                match timeout(
+                                    Duration::from_secs(CANCEL_TIMEOUT_SECS),
+                                    clob_client.cancel_order(order_id),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => {
+                                        info!(
+                                            "[LIVE] Cancelled NO order {} on attempt {}",
+                                            order_id, attempt
+                                        );
+                                        break;
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!(
+                                            "[LIVE] Cancel NO failed (attempt {}): {:?}",
+                                            attempt, e
+                                        )
+                                    }
+                                    Err(_) => {
+                                        warn!("[LIVE] Cancel NO timeout (attempt {})", attempt)
+                                    }
+                                }
+                                if attempt == CANCEL_MAX_RETRIES {
+                                    error!("[LIVE] CRITICAL: Failed to cancel NO order {} after {} attempts. ORPHANED ORDER!", order_id, CANCEL_MAX_RETRIES);
+                                } else {
+                                    tokio::time::sleep(Duration::from_millis(
+                                        CANCEL_RETRY_DELAY_MS,
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
+                        let reason = format!(
+                            "Partial order failure (cancelled other side) - YES: {:?}, NO: {:?}",
+                            yes_err, no_err
+                        );
+                        return Ok(LiveTradeResult::Aborted { reason });
+                    }
+
+                    (yes_id, yes_f, no_id, no_f)
+                }
             }
         };
 
@@ -1886,7 +2721,13 @@ impl TradeExecutor {
                 let no_token = opportunity.no_token_id.clone();
                 let market_name_clone = opportunity.market_name.clone();
                 tokio::spawn(async move {
-                    fetch_and_log_live_orderbook(http_client, yes_token, no_token, market_name_clone).await;
+                    fetch_and_log_live_orderbook(
+                        http_client,
+                        yes_token,
+                        no_token,
+                        market_name_clone,
+                    )
+                    .await;
                 });
             }
             Ok(None) => {

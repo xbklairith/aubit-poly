@@ -48,6 +48,7 @@ anyhow = "1.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1.36", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1.36"
 url = "2.5"
 futures-util = "0.3"
 

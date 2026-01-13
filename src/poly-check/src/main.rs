@@ -19,6 +19,7 @@ use polymarket_client_sdk::clob::types::{BalanceAllowanceRequest, SignatureType}
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -488,6 +489,17 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
             println!("\n  DB Prices:");
             println!("    YES: ask={:?}, bid={:?}", snap.yes_best_ask, snap.yes_best_bid);
             println!("    NO:  ask={:?}, bid={:?}", snap.no_best_ask, snap.no_best_bid);
+
+            // Skip markets with empty orderbooks (bid=0, ask=1.0 indicates no real data)
+            let is_empty_book = matches!(
+                (snap.yes_best_bid, snap.yes_best_ask, snap.no_best_bid, snap.no_best_ask),
+                (Some(y_bid), Some(y_ask), Some(n_bid), Some(n_ask))
+                if y_bid == dec!(0) && y_ask == dec!(1) && n_bid == dec!(0) && n_ask == dec!(1)
+            );
+            if is_empty_book {
+                println!("  ⏭️  Skipping: empty orderbook (bid=0, ask=1.0)");
+                continue;
+            }
 
             if let Ok(yes_book) = yes_book {
                 let live_yes_ask = yes_book.best_ask();

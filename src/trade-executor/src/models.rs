@@ -82,6 +82,26 @@ pub enum BotState {
     Stopping,
 }
 
+/// Order side for sequential placement priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderSide {
+    Yes,
+    No,
+}
+
+/// Result of polling an order for fill status.
+#[derive(Debug, Clone)]
+pub enum PollResult {
+    /// Order was fully filled.
+    FullyFilled(Decimal),
+    /// Order was partially filled.
+    PartialFill(Decimal),
+    /// Polling timed out without full fill.
+    Timeout,
+    /// Error during polling.
+    Error(String),
+}
+
 /// Session runtime state (in-memory).
 #[derive(Debug, Clone)]
 pub struct SessionState {

@@ -147,6 +147,22 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|s| s.parse::<Decimal>().ok())
             .unwrap_or(dec!(0.005)),
+        price_mismatch_threshold: std::env::var("PRICE_MISMATCH_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .unwrap_or(dec!(0.01)), // $0.01 default
+        sequential_poll_interval_ms: std::env::var("SEQUENTIAL_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1000), // 1 second default
+        sequential_poll_timeout_secs: std::env::var("SEQUENTIAL_POLL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10), // 10 seconds default
+        enable_sequential_placement: std::env::var("ENABLE_SEQUENTIAL_PLACEMENT")
+            .ok()
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(true), // Enabled by default
     };
 
     // Create executor

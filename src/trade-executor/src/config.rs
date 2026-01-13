@@ -34,6 +34,19 @@ pub struct ExecutorConfig {
     /// This is an absolute value (e.g., 0.005 = $0.005).
     /// Default: 0.005 (0.5%)
     pub spread_tolerance: Decimal,
+    /// Price mismatch threshold for sequential placement (absolute value in dollars).
+    /// If live CLOB price differs from detection price by more than this, use sequential placement.
+    /// Default: 0.01 ($0.01 or 1 cent)
+    pub price_mismatch_threshold: Decimal,
+    /// Polling interval for sequential order fill check (milliseconds).
+    /// Default: 1000 (1 second)
+    pub sequential_poll_interval_ms: u64,
+    /// Maximum wait time for first order fill in sequential mode (seconds).
+    /// Default: 10
+    pub sequential_poll_timeout_secs: u64,
+    /// Enable sequential placement mode when price mismatch detected.
+    /// Default: true
+    pub enable_sequential_placement: bool,
 }
 
 impl Default for ExecutorConfig {
@@ -57,6 +70,10 @@ impl Default for ExecutorConfig {
                 "XRP".to_string(),
             ],
             spread_tolerance: dec!(0.005),
+            price_mismatch_threshold: dec!(0.01), // $0.01 = 1 cent
+            sequential_poll_interval_ms: 1000,    // 1 second
+            sequential_poll_timeout_secs: 10,     // 10 seconds max wait
+            enable_sequential_placement: true,    // Enabled by default
         }
     }
 }
