@@ -3167,6 +3167,8 @@ mod tests {
             no_asks: Some(no_asks),
             no_bids: None,
             captured_at: Utc::now(),
+            yes_updated_at: Some(Utc::now()),
+            no_updated_at: Some(Utc::now()),
         }
     }
 
@@ -3278,6 +3280,8 @@ mod tests {
             no_asks: None,
             no_bids: None,
             captured_at: Utc::now(),
+            yes_updated_at: None,
+            no_updated_at: None,
         };
         assert_eq!(calculate_orderbook_liquidity(&snapshot), dec!(0));
     }
@@ -3480,6 +3484,8 @@ mod tests {
             no_asks: Some(no_asks),
             no_bids: None,
             captured_at: Utc::now(),
+            yes_updated_at: Some(Utc::now()),
+            no_updated_at: Some(Utc::now()),
         }
     }
 
@@ -3565,6 +3571,8 @@ mod tests {
             no_asks: None, // NULL
             no_bids: None,
             captured_at: Utc::now(),
+            yes_updated_at: None,
+            no_updated_at: None,
         };
 
         let result = extract_best_asks(&snapshot);

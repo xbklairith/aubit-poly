@@ -48,6 +48,10 @@ pub struct OrderbookSnapshot {
     pub no_asks: Option<serde_json::Value>,
     pub no_bids: Option<serde_json::Value>,
     pub captured_at: DateTime<Utc>,
+    /// When YES side was last updated (from Polymarket event timestamp)
+    pub yes_updated_at: Option<DateTime<Utc>>,
+    /// When NO side was last updated (from Polymarket event timestamp)
+    pub no_updated_at: Option<DateTime<Utc>>,
 }
 
 /// A single price level in the orderbook.

@@ -306,6 +306,7 @@ pub async fn insert_orderbook_snapshot(
 
 /// Update only the YES side of an orderbook snapshot.
 /// Preserves the NO side data to prevent stale overwrites.
+/// Uses the event timestamp from Polymarket WebSocket for accurate freshness tracking.
 pub async fn update_yes_orderbook(
     pool: &PgPool,
     market_id: Uuid,
@@ -313,23 +314,27 @@ pub async fn update_yes_orderbook(
     yes_best_bid: Option<rust_decimal::Decimal>,
     yes_asks: Option<serde_json::Value>,
     yes_bids: Option<serde_json::Value>,
+    event_timestamp: Option<DateTime<Utc>>,
 ) -> Result<(), sqlx::Error> {
+    let ts = event_timestamp.unwrap_or_else(Utc::now);
     sqlx::query!(
         r#"
-        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, yes_asks, yes_bids, captured_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, yes_asks, yes_bids, captured_at, yes_updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW(), $6)
         ON CONFLICT (market_id) DO UPDATE SET
             yes_best_ask = $2,
             yes_best_bid = $3,
             yes_asks = $4,
             yes_bids = $5,
-            captured_at = NOW()
+            captured_at = NOW(),
+            yes_updated_at = $6
         "#,
         market_id,
         yes_best_ask,
         yes_best_bid,
         yes_asks,
         yes_bids,
+        ts,
     )
     .execute(pool)
     .await?;
@@ -338,6 +343,7 @@ pub async fn update_yes_orderbook(
 
 /// Update only the NO side of an orderbook snapshot.
 /// Preserves the YES side data to prevent stale overwrites.
+/// Uses the event timestamp from Polymarket WebSocket for accurate freshness tracking.
 pub async fn update_no_orderbook(
     pool: &PgPool,
     market_id: Uuid,
@@ -345,23 +351,27 @@ pub async fn update_no_orderbook(
     no_best_bid: Option<rust_decimal::Decimal>,
     no_asks: Option<serde_json::Value>,
     no_bids: Option<serde_json::Value>,
+    event_timestamp: Option<DateTime<Utc>>,
 ) -> Result<(), sqlx::Error> {
+    let ts = event_timestamp.unwrap_or_else(Utc::now);
     sqlx::query!(
         r#"
-        INSERT INTO orderbook_snapshots (market_id, no_best_ask, no_best_bid, no_asks, no_bids, captured_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO orderbook_snapshots (market_id, no_best_ask, no_best_bid, no_asks, no_bids, captured_at, no_updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW(), $6)
         ON CONFLICT (market_id) DO UPDATE SET
             no_best_ask = $2,
             no_best_bid = $3,
             no_asks = $4,
             no_bids = $5,
-            captured_at = NOW()
+            captured_at = NOW(),
+            no_updated_at = $6
         "#,
         market_id,
         no_best_ask,
         no_best_bid,
         no_asks,
         no_bids,
+        ts,
     )
     .execute(pool)
     .await?;
@@ -388,7 +398,9 @@ pub async fn get_latest_orderbook_snapshot(
             yes_bids,
             no_asks,
             no_bids,
-            COALESCE(captured_at, NOW()) as "captured_at!"
+            COALESCE(captured_at, NOW()) as "captured_at!",
+            yes_updated_at,
+            no_updated_at
         FROM orderbook_snapshots
         WHERE market_id = $1
         ORDER BY captured_at DESC

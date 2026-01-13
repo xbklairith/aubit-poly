@@ -405,8 +405,9 @@ async fn process_book(
             .entry(market_id)
             .or_insert_with(MarketOrderbook::new);
 
-        // Parse and store the event timestamp from Polymarket
-        if let Some(ts) = parse_event_timestamp(&book.timestamp) {
+        // Parse the event timestamp from Polymarket (more accurate than DB NOW())
+        let event_ts = parse_event_timestamp(&book.timestamp);
+        if let Some(ts) = event_ts {
             orderbook.event_timestamp = Some(ts);
         }
 
@@ -417,7 +418,7 @@ async fn process_book(
             orderbook.yes_best_ask = book.best_ask();
             orderbook.yes_best_bid = book.best_bid();
 
-            // Save only YES side to DB
+            // Save only YES side to DB with event timestamp
             let yes_asks = serde_json::to_value(&orderbook.yes_asks)?;
             let yes_bids = serde_json::to_value(&orderbook.yes_bids)?;
             common::update_yes_orderbook(
@@ -427,6 +428,7 @@ async fn process_book(
                 orderbook.yes_best_bid,
                 Some(yes_asks),
                 Some(yes_bids),
+                event_ts,
             )
             .await?;
             *snapshot_count += 1;
@@ -436,7 +438,7 @@ async fn process_book(
             orderbook.no_best_ask = book.best_ask();
             orderbook.no_best_bid = book.best_bid();
 
-            // Save only NO side to DB
+            // Save only NO side to DB with event timestamp
             let no_asks = serde_json::to_value(&orderbook.no_asks)?;
             let no_bids = serde_json::to_value(&orderbook.no_bids)?;
             common::update_no_orderbook(
@@ -446,6 +448,7 @@ async fn process_book(
                 orderbook.no_best_bid,
                 Some(no_asks),
                 Some(no_bids),
+                event_ts,
             )
             .await?;
             *snapshot_count += 1;

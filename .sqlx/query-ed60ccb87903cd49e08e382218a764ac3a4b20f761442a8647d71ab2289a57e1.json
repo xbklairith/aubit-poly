@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO orderbook_snapshots (market_id, no_best_ask, no_best_bid, no_asks, no_bids, captured_at, no_updated_at)\n        VALUES ($1, $2, $3, $4, $5, NOW(), $6)\n        ON CONFLICT (market_id) DO UPDATE SET\n            no_best_ask = $2,\n            no_best_bid = $3,\n            no_asks = $4,\n            no_bids = $5,\n            captured_at = NOW(),\n            no_updated_at = $6\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Jsonb",
+        "Jsonb",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ed60ccb87903cd49e08e382218a764ac3a4b20f761442a8647d71ab2289a57e1"
+}

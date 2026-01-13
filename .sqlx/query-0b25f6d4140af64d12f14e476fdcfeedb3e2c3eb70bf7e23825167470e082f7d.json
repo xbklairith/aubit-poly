@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            market_id,\n            yes_best_ask,\n            yes_best_bid,\n            no_best_ask,\n            no_best_bid,\n            spread,\n            yes_asks,\n            yes_bids,\n            no_asks,\n            no_bids,\n            COALESCE(captured_at, NOW()) as \"captured_at!\"\n        FROM orderbook_snapshots\n        WHERE market_id = $1\n        ORDER BY captured_at DESC\n        LIMIT 1\n        ",
+  "query": "\n        SELECT\n            id,\n            market_id,\n            yes_best_ask,\n            yes_best_bid,\n            no_best_ask,\n            no_best_bid,\n            spread,\n            yes_asks,\n            yes_bids,\n            no_asks,\n            no_bids,\n            COALESCE(captured_at, NOW()) as \"captured_at!\",\n            yes_updated_at,\n            no_updated_at\n        FROM orderbook_snapshots\n        WHERE market_id = $1\n        ORDER BY captured_at DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -62,6 +62,16 @@
         "ordinal": 11,
         "name": "captured_at!",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "yes_updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "no_updated_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -81,8 +91,10 @@
       true,
       true,
       true,
-      null
+      null,
+      true,
+      true
     ]
   },
-  "hash": "e68052d5aa44e7dfdb8097ad1c18c6b9badaf40e571cc2d5a9ed2ea833fd0bd9"
+  "hash": "0b25f6d4140af64d12f14e476fdcfeedb3e2c3eb70bf7e23825167470e082f7d"
 }
