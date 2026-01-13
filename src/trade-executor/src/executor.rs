@@ -1650,9 +1650,10 @@ impl TradeExecutor {
 
                     // === PHASE 3: Place second order ===
                     // Adjust size based on first order fill
+                    // Round to 2 decimal places (Polymarket requirement)
                     let adjusted_second_size = if first_filled < first_size {
                         // Partial fill on first order - match with second to balance
-                        first_filled.min(second_size)
+                        first_filled.min(second_size).round_dp(2)
                     } else {
                         second_size
                     };
