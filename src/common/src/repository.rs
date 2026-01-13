@@ -378,6 +378,64 @@ pub async fn update_no_orderbook(
     Ok(())
 }
 
+/// Update only YES best prices (lightweight update for price_change messages).
+/// Only updates best_ask, best_bid, and timestamps - no JSON columns.
+pub async fn update_yes_best_prices(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_best_ask: Option<rust_decimal::Decimal>,
+    yes_best_bid: Option<rust_decimal::Decimal>,
+    event_timestamp: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    let ts = event_timestamp.unwrap_or_else(Utc::now);
+    sqlx::query!(
+        r#"
+        UPDATE orderbook_snapshots
+        SET yes_best_ask = $2,
+            yes_best_bid = $3,
+            captured_at = NOW(),
+            yes_updated_at = $4
+        WHERE market_id = $1
+        "#,
+        market_id,
+        yes_best_ask,
+        yes_best_bid,
+        ts,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update only NO best prices (lightweight update for price_change messages).
+/// Only updates best_ask, best_bid, and timestamps - no JSON columns.
+pub async fn update_no_best_prices(
+    pool: &PgPool,
+    market_id: Uuid,
+    no_best_ask: Option<rust_decimal::Decimal>,
+    no_best_bid: Option<rust_decimal::Decimal>,
+    event_timestamp: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    let ts = event_timestamp.unwrap_or_else(Utc::now);
+    sqlx::query!(
+        r#"
+        UPDATE orderbook_snapshots
+        SET no_best_ask = $2,
+            no_best_bid = $3,
+            captured_at = NOW(),
+            no_updated_at = $4
+        WHERE market_id = $1
+        "#,
+        market_id,
+        no_best_ask,
+        no_best_bid,
+        ts,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Get the latest orderbook snapshot for a market.
 pub async fn get_latest_orderbook_snapshot(
     pool: &PgPool,
@@ -447,7 +505,8 @@ pub async fn get_market_by_condition_id(
 }
 
 /// Get markets with fresh orderbook prices using DISTINCT ON.
-/// Only returns markets with orderbook data captured within max_age_seconds.
+/// Only returns markets where BOTH yes_updated_at and no_updated_at are within max_age_seconds.
+/// This ensures both sides of the orderbook are fresh for accurate spread detection.
 pub async fn get_markets_with_fresh_orderbooks(
     pool: &PgPool,
     max_age_seconds: i32,
@@ -467,6 +526,7 @@ pub async fn get_markets_with_fresh_orderbooks(
     // Use DISTINCT ON instead of LATERAL JOIN for better performance
     // LATERAL executes a subquery per market row (N queries)
     // DISTINCT ON scans orderbook_snapshots once and deduplicates (1 query)
+    // Filter requires BOTH yes_updated_at AND no_updated_at to be fresh
     let results = sqlx::query_as!(
         MarketWithPrices,
         r#"
@@ -491,7 +551,8 @@ pub async fn get_markets_with_fresh_orderbooks(
             SELECT DISTINCT ON (market_id)
                 market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
             FROM orderbook_snapshots
-            WHERE captured_at > $1
+            WHERE yes_updated_at > $1
+              AND no_updated_at > $1
             ORDER BY market_id, captured_at DESC
         ) o ON o.market_id = m.id
         WHERE m.is_active = true
@@ -543,7 +604,8 @@ pub async fn get_all_markets_with_fresh_orderbooks(
             SELECT DISTINCT ON (market_id)
                 market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
             FROM orderbook_snapshots
-            WHERE captured_at > $1
+            WHERE yes_updated_at > $1
+              AND no_updated_at > $1
             ORDER BY market_id, captured_at DESC
         ) o ON o.market_id = m.id
         WHERE m.is_active = true

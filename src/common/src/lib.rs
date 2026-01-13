@@ -13,13 +13,13 @@ pub mod gamma;
 pub mod models;
 pub mod repository;
 
-pub use clob::{BookMessage, ClobClient, ClobMessage, PriceLevel};
+pub use clob::{BookMessage, ClobClient, ClobMessage, PriceChange, PriceChangeMessage, PriceLevel};
 pub use config::Config;
 pub use db::Database;
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{
     deactivate_expired_markets, get_active_markets, get_active_markets_expiring_within,
     get_latest_orderbook_snapshot, get_market_by_condition_id, get_markets_with_fresh_orderbooks,
-    get_priority_markets_hybrid, insert_orderbook_snapshot, update_no_orderbook,
-    update_yes_orderbook, upsert_market,
+    get_priority_markets_hybrid, insert_orderbook_snapshot, update_no_best_prices,
+    update_no_orderbook, update_yes_best_prices, update_yes_orderbook, upsert_market,
 };

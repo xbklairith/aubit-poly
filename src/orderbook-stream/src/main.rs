@@ -15,8 +15,9 @@ use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 use common::{
-    get_active_markets_expiring_within, get_priority_markets_hybrid, ClobClient, ClobMessage,
-    Config, Database, PriceLevel,
+    get_active_markets_expiring_within, get_priority_markets_hybrid, BookMessage, ClobClient,
+    ClobMessage, Config, Database, PriceChange, PriceLevel, update_no_best_prices,
+    update_yes_best_prices,
 };
 
 /// Maximum age (in ms) for buffered messages to be considered fresh.
@@ -337,9 +338,61 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                     return Ok(());
                 }
             }
-            Ok(Ok(Some(ClobMessage::PriceChange(_)))) => {
-                // Price changes are delta updates, we primarily care about full book snapshots
-                debug!("Received price change (ignoring)");
+            Ok(Ok(Some(ClobMessage::PriceChange(pc)))) => {
+                consecutive_timeouts = 0;
+                message_count += 1;
+
+                let event_ts = parse_event_timestamp(&pc.timestamp);
+
+                for change in &pc.price_changes {
+                    if let Some(&(market_id, is_yes)) = token_to_market.get(&change.asset_id) {
+                        let orderbook = orderbooks.entry(market_id).or_insert_with(MarketOrderbook::new);
+
+                        // Track old best prices to detect changes
+                        let (old_best_bid, old_best_ask) = if is_yes {
+                            (orderbook.yes_best_bid, orderbook.yes_best_ask)
+                        } else {
+                            (orderbook.no_best_bid, orderbook.no_best_ask)
+                        };
+
+                        // Apply the delta to in-memory state
+                        apply_price_change(orderbook, change, is_yes);
+
+                        // Only write to DB if best prices actually changed
+                        let (new_best_bid, new_best_ask) = if is_yes {
+                            (orderbook.yes_best_bid, orderbook.yes_best_ask)
+                        } else {
+                            (orderbook.no_best_bid, orderbook.no_best_ask)
+                        };
+
+                        if old_best_bid != new_best_bid || old_best_ask != new_best_ask {
+                            if is_yes {
+                                update_yes_best_prices(
+                                    db.pool(),
+                                    market_id,
+                                    new_best_ask,
+                                    new_best_bid,
+                                    event_ts,
+                                )
+                                .await?;
+                            } else {
+                                update_no_best_prices(
+                                    db.pool(),
+                                    market_id,
+                                    new_best_ask,
+                                    new_best_bid,
+                                    event_ts,
+                                )
+                                .await?;
+                            }
+                            debug!(
+                                "Price change updated best prices for market {} ({})",
+                                market_id,
+                                if is_yes { "YES" } else { "NO" }
+                            );
+                        }
+                    }
+                }
             }
             Ok(Ok(Some(ClobMessage::Trade(trade)))) => {
                 debug!(
@@ -405,6 +458,15 @@ async fn process_book(
             .entry(market_id)
             .or_insert_with(MarketOrderbook::new);
 
+        // Validate hash against accumulated price_changes (if we have prior state)
+        if !validate_book(orderbook, book, is_yes) {
+            debug!(
+                "Hash mismatch for market {} ({}), resetting to book snapshot",
+                market_id,
+                if is_yes { "YES" } else { "NO" }
+            );
+        }
+
         // Parse the event timestamp from Polymarket (more accurate than DB NOW())
         let event_ts = parse_event_timestamp(&book.timestamp);
         if let Some(ts) = event_ts {
@@ -417,6 +479,7 @@ async fn process_book(
             orderbook.yes_bids = book.bids.clone();
             orderbook.yes_best_ask = book.best_ask();
             orderbook.yes_best_bid = book.best_bid();
+            orderbook.yes_hash = Some(book.hash.clone()); // Store hash for validation
 
             // Save only YES side to DB with event timestamp
             let yes_asks = serde_json::to_value(&orderbook.yes_asks)?;
@@ -437,6 +500,7 @@ async fn process_book(
             orderbook.no_bids = book.bids.clone();
             orderbook.no_best_ask = book.best_ask();
             orderbook.no_best_bid = book.best_bid();
+            orderbook.no_hash = Some(book.hash.clone()); // Store hash for validation
 
             // Save only NO side to DB with event timestamp
             let no_asks = serde_json::to_value(&orderbook.no_asks)?;
@@ -470,10 +534,84 @@ struct MarketOrderbook {
     no_best_bid: Option<Decimal>,
     /// Timestamp from Polymarket event (more accurate than DB NOW())
     event_timestamp: Option<DateTime<Utc>>,
+    /// Hash of YES orderbook for validation against price_change deltas
+    yes_hash: Option<String>,
+    /// Hash of NO orderbook for validation against price_change deltas
+    no_hash: Option<String>,
 }
 
 impl MarketOrderbook {
     fn new() -> Self {
         Self::default()
+    }
+}
+
+/// Apply a price_change delta to the in-memory orderbook.
+/// Updates the specific price level and best prices from the message.
+fn apply_price_change(orderbook: &mut MarketOrderbook, change: &PriceChange, is_yes: bool) {
+    // Parse price and size
+    let price: Option<Decimal> = change.price.parse().ok();
+    let size: Option<Decimal> = change.size.parse().ok();
+
+    if let (Some(price), Some(size)) = (price, size) {
+        // Determine which side to update
+        let levels = match (is_yes, change.side.as_str()) {
+            (true, "BUY") => &mut orderbook.yes_bids,
+            (true, "SELL") => &mut orderbook.yes_asks,
+            (false, "BUY") => &mut orderbook.no_bids,
+            (false, "SELL") => &mut orderbook.no_asks,
+            _ => return,
+        };
+
+        // Convert price to string for comparison with PriceLevel
+        let price_str = price.to_string();
+
+        if size.is_zero() {
+            // Remove level
+            levels.retain(|l| l.price != price_str);
+        } else {
+            // Update or insert level
+            if let Some(level) = levels.iter_mut().find(|l| l.price == price_str) {
+                level.size = size.to_string();
+            } else {
+                levels.push(PriceLevel {
+                    price: price_str,
+                    size: size.to_string(),
+                });
+            }
+        }
+    }
+
+    // Update best prices from message (authoritative - Polymarket calculates these)
+    if is_yes {
+        orderbook.yes_best_bid = change.best_bid.as_ref().and_then(|p| p.parse().ok());
+        orderbook.yes_best_ask = change.best_ask.as_ref().and_then(|p| p.parse().ok());
+        orderbook.yes_hash = change.hash.clone();
+    } else {
+        orderbook.no_best_bid = change.best_bid.as_ref().and_then(|p| p.parse().ok());
+        orderbook.no_best_ask = change.best_ask.as_ref().and_then(|p| p.parse().ok());
+        orderbook.no_hash = change.hash.clone();
+    }
+}
+
+/// Validate that the book snapshot matches our accumulated price_change state.
+/// Returns true if hashes match, false if there's a mismatch (drift detected).
+fn validate_book(orderbook: &MarketOrderbook, book: &BookMessage, is_yes: bool) -> bool {
+    let expected_hash = if is_yes {
+        &orderbook.yes_hash
+    } else {
+        &orderbook.no_hash
+    };
+
+    match expected_hash {
+        Some(h) if h == &book.hash => true,
+        Some(h) => {
+            warn!(
+                "Hash mismatch for asset {}: expected={} got={}",
+                book.asset_id, h, book.hash
+            );
+            false
+        }
+        None => true, // First book, no validation needed
     }
 }
