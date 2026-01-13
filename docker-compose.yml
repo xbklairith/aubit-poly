@@ -12,8 +12,8 @@ services:
     command: >
       --dry-run=false
       --verbose-timing
-      --assets ALL
-      --max-time-to-expiry 5184000
+      --assets BTC,ETH,SOL,XRP
+      --max-time-to-expiry 3600
       --max-orderbook-age 30
       --min-profit 0.02
       --max-position-size 10
@@ -31,6 +31,13 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: >
+      --hybrid
+      --crypto-hours 1
+      --crypto-limit 100
+      --event-limit 0
+      --reconnect-interval 20
     restart: unless-stopped
     networks:
       - aubit-net
@@ -45,6 +52,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: --interval 60
     restart: unless-stopped
     networks:
       - aubit-net
