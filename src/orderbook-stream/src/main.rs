@@ -474,12 +474,14 @@ async fn process_book(
         }
 
         // Update only the side that changed to prevent stale overwrites
+        // Reset pending changes flag since we're syncing to authoritative book snapshot
         if is_yes {
             orderbook.yes_asks = book.asks.clone();
             orderbook.yes_bids = book.bids.clone();
             orderbook.yes_best_ask = book.best_ask();
             orderbook.yes_best_bid = book.best_bid();
-            orderbook.yes_hash = Some(book.hash.clone()); // Store hash for validation
+            orderbook.yes_hash = Some(book.hash.clone());
+            orderbook.yes_has_pending_changes = false; // Reset - synced to book
 
             // Save only YES side to DB with event timestamp
             let yes_asks = serde_json::to_value(&orderbook.yes_asks)?;
@@ -500,7 +502,8 @@ async fn process_book(
             orderbook.no_bids = book.bids.clone();
             orderbook.no_best_ask = book.best_ask();
             orderbook.no_best_bid = book.best_bid();
-            orderbook.no_hash = Some(book.hash.clone()); // Store hash for validation
+            orderbook.no_hash = Some(book.hash.clone());
+            orderbook.no_has_pending_changes = false; // Reset - synced to book
 
             // Save only NO side to DB with event timestamp
             let no_asks = serde_json::to_value(&orderbook.no_asks)?;
@@ -538,6 +541,10 @@ struct MarketOrderbook {
     yes_hash: Option<String>,
     /// Hash of NO orderbook for validation against price_change deltas
     no_hash: Option<String>,
+    /// True if price_changes were applied since last YES book snapshot
+    yes_has_pending_changes: bool,
+    /// True if price_changes were applied since last NO book snapshot
+    no_has_pending_changes: bool,
 }
 
 impl MarketOrderbook {
@@ -583,35 +590,44 @@ fn apply_price_change(orderbook: &mut MarketOrderbook, change: &PriceChange, is_
     }
 
     // Update best prices from message (authoritative - Polymarket calculates these)
+    // Mark that we have pending changes for hash validation
     if is_yes {
         orderbook.yes_best_bid = change.best_bid.as_ref().and_then(|p| p.parse().ok());
         orderbook.yes_best_ask = change.best_ask.as_ref().and_then(|p| p.parse().ok());
         orderbook.yes_hash = change.hash.clone();
+        orderbook.yes_has_pending_changes = true;
     } else {
         orderbook.no_best_bid = change.best_bid.as_ref().and_then(|p| p.parse().ok());
         orderbook.no_best_ask = change.best_ask.as_ref().and_then(|p| p.parse().ok());
         orderbook.no_hash = change.hash.clone();
+        orderbook.no_has_pending_changes = true;
     }
 }
 
 /// Validate that the book snapshot matches our accumulated price_change state.
-/// Returns true if hashes match, false if there's a mismatch (drift detected).
+/// Only validates if we have pending price_changes since the last book snapshot.
+/// Returns true if valid (no pending changes, or hashes match), false if drift detected.
 fn validate_book(orderbook: &MarketOrderbook, book: &BookMessage, is_yes: bool) -> bool {
-    let expected_hash = if is_yes {
-        &orderbook.yes_hash
+    let (has_pending, expected_hash) = if is_yes {
+        (orderbook.yes_has_pending_changes, &orderbook.yes_hash)
     } else {
-        &orderbook.no_hash
+        (orderbook.no_has_pending_changes, &orderbook.no_hash)
     };
+
+    // Only validate if we've accumulated price_changes since last book snapshot
+    if !has_pending {
+        return true;
+    }
 
     match expected_hash {
         Some(h) if h == &book.hash => true,
         Some(h) => {
             warn!(
-                "Hash mismatch for asset {}: expected={} got={}",
+                "Hash mismatch for asset {}: expected={} got={} (state drift detected)",
                 book.asset_id, h, book.hash
             );
             false
         }
-        None => true, // First book, no validation needed
+        None => true, // No prior hash to compare
     }
 }
