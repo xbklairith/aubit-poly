@@ -245,6 +245,90 @@ fn log_market_depth(snapshot: &OrderbookSnapshot, market_name: &str, max_levels:
     }
 }
 
+/// Fetch and log live orderbook from CLOB REST API (non-blocking).
+/// This runs in a spawned task to avoid blocking order execution.
+async fn fetch_and_log_live_orderbook(
+    http_client: reqwest::Client,
+    yes_token_id: String,
+    no_token_id: String,
+    market_name: String,
+) {
+    #[derive(serde::Deserialize)]
+    struct ClobBook {
+        bids: Vec<ClobLevel>,
+        asks: Vec<ClobLevel>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ClobLevel {
+        price: String,
+        #[allow(dead_code)]
+        size: String,
+    }
+
+    let yes_url = format!("{}/book?token_id={}", CLOB_HOST, yes_token_id);
+    let no_url = format!("{}/book?token_id={}", CLOB_HOST, no_token_id);
+
+    // Fetch both in parallel
+    let (yes_result, no_result) = tokio::join!(
+        http_client.get(&yes_url).send(),
+        http_client.get(&no_url).send(),
+    );
+
+    // Parse YES book
+    let yes_prices = match yes_result {
+        Ok(resp) => match resp.json::<ClobBook>().await {
+            Ok(book) => {
+                let best_ask = book.asks.iter()
+                    .filter_map(|l| l.price.parse::<Decimal>().ok())
+                    .min();
+                let best_bid = book.bids.iter()
+                    .filter_map(|l| l.price.parse::<Decimal>().ok())
+                    .max();
+                Some((best_ask, best_bid))
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+
+    // Parse NO book
+    let no_prices = match no_result {
+        Ok(resp) => match resp.json::<ClobBook>().await {
+            Ok(book) => {
+                let best_ask = book.asks.iter()
+                    .filter_map(|l| l.price.parse::<Decimal>().ok())
+                    .min();
+                let best_bid = book.bids.iter()
+                    .filter_map(|l| l.price.parse::<Decimal>().ok())
+                    .max();
+                Some((best_ask, best_bid))
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+
+    // Log results
+    let short_name = if market_name.len() > 50 {
+        format!("{}...", &market_name[..47])
+    } else {
+        market_name.clone()
+    };
+
+    match (yes_prices, no_prices) {
+        (Some((yes_ask, yes_bid)), Some((no_ask, no_bid))) => {
+            info!(
+                "[API-DEPTH] {} | YES: ask={:?} bid={:?} | NO: ask={:?} bid={:?}",
+                short_name, yes_ask, yes_bid, no_ask, no_bid
+            );
+        }
+        _ => {
+            warn!("[API-DEPTH] {} | Failed to fetch live orderbook", short_name);
+        }
+    }
+}
+
 use crate::config::ExecutorConfig;
 use crate::detector::SpreadDetector;
 use crate::metrics::{CycleMetrics, MarketSummary};
@@ -286,6 +370,8 @@ pub struct TradeExecutor {
     cached_auth: Option<CachedAuthentication>,
     /// Token IDs that have been warmed in SDK cache (tick_size + fee_rate)
     warmed_tokens: HashSet<String>,
+    /// HTTP client for API calls (reusable, connection pooled)
+    http_client: reqwest::Client,
 }
 
 impl TradeExecutor {
@@ -318,6 +404,7 @@ impl TradeExecutor {
             session,
             cached_auth: None, // REQ-001: Initialize as None, authenticate on first trade
             warmed_tokens: HashSet::new(),
+            http_client: reqwest::Client::new(),
         })
     }
 
@@ -745,9 +832,10 @@ impl TradeExecutor {
             details.no_price
         );
 
-        // Clone Arc<Database> before borrowing self (for use inside auth scope)
+        // Clone Arc<Database> and http_client before borrowing self (for use inside auth scope)
         let db = self.db.clone();
         let max_orderbook_age = self.config.max_orderbook_age_secs;
+        let http_client_for_api = self.http_client.clone();
 
         // Get credentials for rebalance task (read before ensure_authenticated borrows self)
         let private_key = std::env::var("WALLET_PRIVATE_KEY")
@@ -883,6 +971,14 @@ impl TradeExecutor {
         // REQ-007: Log market depth using the SAME snapshot used for price validation
         // This ensures the depth display matches the prices used for orders
         log_market_depth(&snapshot, &opportunity.market_name, 5);
+
+        // Spawn non-blocking API fetch to compare DB prices with live API
+        let yes_token = opportunity.yes_token_id.clone();
+        let no_token = opportunity.no_token_id.clone();
+        let market_name_clone = opportunity.market_name.clone();
+        tokio::spawn(async move {
+            fetch_and_log_live_orderbook(http_client_for_api, yes_token, no_token, market_name_clone).await;
+        });
 
         // Execute orders based on trade mode
         let (yes_order_id, yes_filled, no_order_id, no_filled): (
@@ -1783,6 +1879,15 @@ impl TradeExecutor {
         {
             Ok(Some(snapshot)) => {
                 log_market_depth(&snapshot, &opportunity.market_name, 5);
+
+                // Spawn non-blocking API fetch to compare DB prices with live API
+                let http_client = self.http_client.clone();
+                let yes_token = opportunity.yes_token_id.clone();
+                let no_token = opportunity.no_token_id.clone();
+                let market_name_clone = opportunity.market_name.clone();
+                tokio::spawn(async move {
+                    fetch_and_log_live_orderbook(http_client, yes_token, no_token, market_name_clone).await;
+                });
             }
             Ok(None) => {
                 warn!("[DRY RUN] No orderbook snapshot available for market depth visualization");

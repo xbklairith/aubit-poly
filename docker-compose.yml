@@ -78,18 +78,13 @@ services:
       context: .
       dockerfile: Dockerfile.trade-executor
     container_name: audit-prices
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: []
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
       RUST_LOG: info
-    command: >
-      while true; do
-        poly-check --audit-prices --audit-limit 20 --audit-assets BTC,ETH,SOL,XRP;
-        echo "--- Sleeping 30s ---";
-        sleep 30;
-      done
+    command: ["sh", "-c", "while true; do poly-check --audit-prices --audit-limit 20 --audit-assets BTC,ETH,SOL,XRP; echo '--- Sleeping 30s ---'; sleep 30; done"]
     restart: unless-stopped
     networks:
       - aubit-net
