@@ -1334,9 +1334,11 @@ impl TradeExecutor {
                                 "[MISMATCH] Prices differ from live CLOB! YES: detection={} live={} (diff={}), NO: detection={} live={} (diff={})",
                                 yes_price, live_yes, yes_diff, no_price, live_no, no_diff
                             );
+
+                        let live_spread = live_yes + live_no;
                         info!(
-                                "[SEQUENTIAL] Using sequential placement, priority side: {:?} (will use detection prices YES=${}, NO=${})",
-                                priority_side, yes_price, no_price
+                                "[SEQUENTIAL] Using sequential placement, priority side: {:?} (live spread ${})",
+                                priority_side, live_spread
                             );
                         Some((priority_side, live_yes, live_no))
                     } else {

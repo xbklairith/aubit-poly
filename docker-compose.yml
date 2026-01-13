@@ -37,7 +37,7 @@ services:
       --crypto-hours 1
       --crypto-limit 100
       --event-limit 0
-      --reconnect-interval 20
+      --reconnect-interval 300
     restart: unless-stopped
     networks:
       - aubit-net

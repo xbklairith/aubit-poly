@@ -19,6 +19,10 @@ use common::{
     ClobClient, ClobMessage, Config, Database, PriceLevel,
 };
 
+/// Maximum age (in ms) for buffered messages to be considered fresh.
+/// Messages older than this are discarded to prevent stale prices.
+const MAX_BUFFERED_AGE_MS: i64 = 5000;
+
 /// Orderbook Stream - real-time orderbook data via WebSocket
 #[derive(Parser, Debug)]
 #[command(name = "orderbook-stream")]
@@ -181,15 +185,26 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
     let mut orderbooks: HashMap<Uuid, MarketOrderbook> = HashMap::new();
     let mut snapshot_count = 0;
 
-    // Process buffered messages from subscription phase
+    // Process buffered messages from subscription phase (with staleness filter)
+    let now = Utc::now();
     for msg in buffered {
         match msg {
             ClobMessage::Books(books) => {
-                info!(
-                    "Processing buffered batch of {} book snapshots",
-                    books.len()
-                );
+                let total = books.len();
+                let mut fresh_count = 0;
+                let mut stale_count = 0;
+
                 for book in books {
+                    // Filter out stale buffered messages to prevent mispriced trades
+                    // Also handle clock skew: negative age means server clock ahead
+                    if let Some(ts) = parse_event_timestamp(&book.timestamp) {
+                        let age_ms = (now - ts).num_milliseconds();
+                        if age_ms < 0 || age_ms > MAX_BUFFERED_AGE_MS {
+                            stale_count += 1;
+                            continue;
+                        }
+                    }
+                    fresh_count += 1;
                     process_book(
                         &book,
                         &token_to_market,
@@ -201,8 +216,20 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
                     )
                     .await?;
                 }
+
+                info!(
+                    "Processing buffered batch of {} book snapshots ({} fresh, {} stale filtered)",
+                    total, fresh_count, stale_count
+                );
             }
             ClobMessage::Book(book) => {
+                // Filter stale single book messages too (with clock skew protection)
+                if let Some(ts) = parse_event_timestamp(&book.timestamp) {
+                    let age_ms = (now - ts).num_milliseconds();
+                    if age_ms < 0 || age_ms > MAX_BUFFERED_AGE_MS {
+                        continue;
+                    }
+                }
                 process_book(
                     &book,
                     &token_to_market,

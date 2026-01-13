@@ -72,8 +72,8 @@ module.exports = {
       },
       // Hybrid mode: crypto (12h) + event markets (60 days)
       // Supports both short-term crypto and long-dated events (Super Bowl, elections)
-      // Reconnect every 20s to refresh all orderbooks for 30s freshness filter
-      args: '--hybrid --crypto-hours 12 --event-days 60 --crypto-limit 1500 --event-limit 1500 --reconnect-interval 20',
+      // Reconnect every 300s (5min) - subscription takes 60s+ so short intervals cause stale data
+      args: '--hybrid --crypto-hours 12 --event-days 60 --crypto-limit 1500 --event-limit 1500 --reconnect-interval 300',
     },
 
     // Rust Trade Executor Service
@@ -92,7 +92,7 @@ module.exports = {
       },
       // Dry run mode with 1 second intervals
       // Match Python: assets include UNKNOWN, max expiry 60 days, min profit 2%
-      // 30s orderbook freshness - orderbook-stream reconnects every 20s to keep fresh
+      // 30s orderbook freshness - staleness filter discards buffered messages >5s old
       args: '--dry-run --interval-ms 1000 --verbose-timing --assets BTC,ETH,SOL,XRP,UNKNOWN --max-time-to-expiry 5184000 --max-orderbook-age 30 --min-profit 0.02',
     },
 
