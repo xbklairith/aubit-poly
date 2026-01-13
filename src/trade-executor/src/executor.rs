@@ -36,6 +36,9 @@ const CANCEL_RETRY_DELAY_MS: u64 = 500;
 /// Wait time before converting unfilled limit order to market order
 const UNFILLED_WAIT_SECS: u64 = 10;
 
+/// Minimum order size for Polymarket (shares)
+const MIN_ORDER_SIZE: Decimal = dec!(5);
+
 use common::models::OrderbookSnapshot;
 use common::repository::{self, MarketWithPrices};
 use common::Database;
@@ -1660,15 +1663,135 @@ impl TradeExecutor {
                         second_size
                     };
 
-                    // Guard: Skip second order if adjusted size is zero
+                    // Guard: Skip second order if adjusted size is zero or below minimum
                     if adjusted_second_size == Decimal::ZERO {
                         warn!("[SEQUENTIAL] Adjusted second order size is zero, aborting trade");
-                        // This shouldn't happen since we already guard for zero first_fill
-                        // but if it does, abort cleanly
                         return Ok(LiveTradeResult::Aborted {
                             reason: format!(
                                 "Second order size would be zero after {} order filled {}",
                                 first_tag, first_filled
+                            ),
+                        });
+                    }
+
+                    // Guard: If adjusted size is below Polymarket minimum, skip hedge and recover
+                    if adjusted_second_size < MIN_ORDER_SIZE {
+                        warn!(
+                            "[SEQUENTIAL] Adjusted second order size {} is below minimum {}, initiating recovery",
+                            adjusted_second_size, MIN_ORDER_SIZE
+                        );
+
+                        // Recovery: Use GTC limit order to sell at a competitive price
+                        let recovery_status = if first_filled > Decimal::ZERO {
+                            warn!(
+                                "[SEQUENTIAL] Initiating GTC recovery sell of {} {} shares",
+                                first_filled, first_tag
+                            );
+
+                            // Try to sell at a price slightly below market (more likely to fill)
+                            // Use the opposite side's best bid price minus a small buffer
+                            let recovery_price = (Decimal::ONE - first_price - dec!(0.01)).max(dec!(0.01));
+                            info!(
+                                "[SEQUENTIAL] Recovery sell: {} @ ${} (GTC limit)",
+                                first_filled, recovery_price
+                            );
+
+                            let mut sell_succeeded = false;
+                            let mut sell_error: Option<String> = None;
+
+                            match timeout(
+                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                clob_client
+                                    .limit_order()
+                                    .token_id(first_token_id)
+                                    .size(first_filled)
+                                    .price(recovery_price)
+                                    .side(polymarket_client_sdk::clob::types::Side::Sell)
+                                    .build(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(sell_order)) => {
+                                    match timeout(
+                                        Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                        clob_client.sign(&signer, sell_order),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(signed_sell)) => {
+                                            match timeout(
+                                                Duration::from_secs(ORDER_TIMEOUT_SECS),
+                                                clob_client.post_order(signed_sell),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(sell_result)) => {
+                                                    let (sell_order_id, sell_filled, _) =
+                                                        extract_order_info(&sell_result)
+                                                            .unwrap_or((None, dec!(0), None));
+                                                    if sell_order_id.is_some() {
+                                                        info!(
+                                                            "[SEQUENTIAL] Recovery GTC sell placed: order_id={:?}, immediate_fill={}",
+                                                            sell_order_id, sell_filled
+                                                        );
+                                                        sell_succeeded = true;
+                                                    } else {
+                                                        sell_error = Some("Order rejected".to_string());
+                                                        error!(
+                                                            "[SEQUENTIAL] Recovery GTC sell REJECTED: {:?}",
+                                                            sell_result
+                                                        );
+                                                    }
+                                                }
+                                                Ok(Err(e)) => {
+                                                    sell_error = Some(format!("Post failed: {:?}", e));
+                                                    error!("[SEQUENTIAL] Recovery sell post failed: {:?}", e);
+                                                }
+                                                Err(_) => {
+                                                    sell_error = Some("Post timed out".to_string());
+                                                    error!("[SEQUENTIAL] Recovery sell post timed out");
+                                                }
+                                            }
+                                        }
+                                        Ok(Err(e)) => {
+                                            sell_error = Some(format!("Sign failed: {:?}", e));
+                                            error!("[SEQUENTIAL] Recovery sell sign failed: {:?}", e);
+                                        }
+                                        Err(_) => {
+                                            sell_error = Some("Sign timed out".to_string());
+                                            error!("[SEQUENTIAL] Recovery sell sign timed out");
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    sell_error = Some(format!("Build failed: {:?}", e));
+                                    error!("[SEQUENTIAL] Recovery sell build failed: {:?}", e);
+                                }
+                                Err(_) => {
+                                    sell_error = Some("Build timed out".to_string());
+                                    error!("[SEQUENTIAL] Recovery sell build timed out");
+                                }
+                            }
+
+                            if sell_succeeded {
+                                "recovery GTC sell PLACED - check position later"
+                            } else {
+                                error!(
+                                    "[SEQUENTIAL] CRITICAL: Recovery GTC sell FAILED ({}). {} {} shares may remain! MANUAL INTERVENTION REQUIRED!",
+                                    sell_error.as_deref().unwrap_or("unknown"),
+                                    first_filled,
+                                    first_tag
+                                );
+                                "recovery sell FAILED - MANUAL INTERVENTION REQUIRED"
+                            }
+                        } else {
+                            "no recovery needed (zero fill)"
+                        };
+
+                        return Ok(LiveTradeResult::Aborted {
+                            reason: format!(
+                                "Partial fill {} below minimum order size {} - {}",
+                                adjusted_second_size, MIN_ORDER_SIZE, recovery_status
                             ),
                         });
                     }
