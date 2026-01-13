@@ -15,8 +15,8 @@ use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 use common::{
-    get_active_markets_expiring_within, get_priority_markets_hybrid, insert_orderbook_snapshot,
-    ClobClient, ClobMessage, Config, Database, PriceLevel,
+    get_active_markets_expiring_within, get_priority_markets_hybrid, ClobClient, ClobMessage,
+    Config, Database, PriceLevel,
 };
 
 /// Maximum age (in ms) for buffered messages to be considered fresh.
@@ -410,59 +410,47 @@ async fn process_book(
             orderbook.event_timestamp = Some(ts);
         }
 
+        // Update only the side that changed to prevent stale overwrites
         if is_yes {
             orderbook.yes_asks = book.asks.clone();
             orderbook.yes_bids = book.bids.clone();
             orderbook.yes_best_ask = book.best_ask();
             orderbook.yes_best_bid = book.best_bid();
+
+            // Save only YES side to DB
+            let yes_asks = serde_json::to_value(&orderbook.yes_asks)?;
+            let yes_bids = serde_json::to_value(&orderbook.yes_bids)?;
+            common::update_yes_orderbook(
+                db.pool(),
+                market_id,
+                orderbook.yes_best_ask,
+                orderbook.yes_best_bid,
+                Some(yes_asks),
+                Some(yes_bids),
+            )
+            .await?;
+            *snapshot_count += 1;
         } else {
             orderbook.no_asks = book.asks.clone();
             orderbook.no_bids = book.bids.clone();
             orderbook.no_best_ask = book.best_ask();
             orderbook.no_best_bid = book.best_bid();
-        }
 
-        // Save snapshot whenever we have any data (refresh captured_at on every update)
-        // This keeps orderbooks fresh even when only one side gets updates
-        if orderbook.has_any_data() {
-            save_snapshot(db, market_id, orderbook).await?;
+            // Save only NO side to DB
+            let no_asks = serde_json::to_value(&orderbook.no_asks)?;
+            let no_bids = serde_json::to_value(&orderbook.no_bids)?;
+            common::update_no_orderbook(
+                db.pool(),
+                market_id,
+                orderbook.no_best_ask,
+                orderbook.no_best_bid,
+                Some(no_asks),
+                Some(no_bids),
+            )
+            .await?;
             *snapshot_count += 1;
         }
     }
-    Ok(())
-}
-
-/// Save an orderbook snapshot to the database.
-async fn save_snapshot(db: &Database, market_id: Uuid, orderbook: &MarketOrderbook) -> Result<()> {
-    let yes_asks = serde_json::to_value(&orderbook.yes_asks)?;
-    let yes_bids = serde_json::to_value(&orderbook.yes_bids)?;
-    let no_asks = serde_json::to_value(&orderbook.no_asks)?;
-    let no_bids = serde_json::to_value(&orderbook.no_bids)?;
-
-    insert_orderbook_snapshot(
-        db.pool(),
-        market_id,
-        orderbook.yes_best_ask,
-        orderbook.yes_best_bid,
-        orderbook.no_best_ask,
-        orderbook.no_best_bid,
-        Some(yes_asks),
-        Some(yes_bids),
-        Some(no_asks),
-        Some(no_bids),
-        orderbook.event_timestamp, // Use Polymarket event timestamp
-    )
-    .await?;
-
-    debug!(
-        "Saved snapshot for market {}: yes_ask={:?}, yes_bid={:?}, no_ask={:?}, no_bid={:?}",
-        market_id,
-        orderbook.yes_best_ask,
-        orderbook.yes_best_bid,
-        orderbook.no_best_ask,
-        orderbook.no_best_bid
-    );
-
     Ok(())
 }
 
@@ -484,21 +472,5 @@ struct MarketOrderbook {
 impl MarketOrderbook {
     fn new() -> Self {
         Self::default()
-    }
-
-    /// Check if we have data for both YES and NO sides.
-    fn has_both_sides(&self) -> bool {
-        (self.yes_best_ask.is_some() || !self.yes_asks.is_empty())
-            && (self.no_best_ask.is_some() || !self.no_asks.is_empty())
-    }
-
-    /// Check if we have any data at all.
-    fn has_any_data(&self) -> bool {
-        self.yes_best_ask.is_some()
-            || self.yes_best_bid.is_some()
-            || self.no_best_ask.is_some()
-            || self.no_best_bid.is_some()
-            || !self.yes_asks.is_empty()
-            || !self.no_asks.is_empty()
     }
 }

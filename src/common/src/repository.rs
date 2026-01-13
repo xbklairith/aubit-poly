@@ -304,6 +304,70 @@ pub async fn insert_orderbook_snapshot(
     Ok(result)
 }
 
+/// Update only the YES side of an orderbook snapshot.
+/// Preserves the NO side data to prevent stale overwrites.
+pub async fn update_yes_orderbook(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_best_ask: Option<rust_decimal::Decimal>,
+    yes_best_bid: Option<rust_decimal::Decimal>,
+    yes_asks: Option<serde_json::Value>,
+    yes_bids: Option<serde_json::Value>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO orderbook_snapshots (market_id, yes_best_ask, yes_best_bid, yes_asks, yes_bids, captured_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (market_id) DO UPDATE SET
+            yes_best_ask = $2,
+            yes_best_bid = $3,
+            yes_asks = $4,
+            yes_bids = $5,
+            captured_at = NOW()
+        "#,
+        market_id,
+        yes_best_ask,
+        yes_best_bid,
+        yes_asks,
+        yes_bids,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Update only the NO side of an orderbook snapshot.
+/// Preserves the YES side data to prevent stale overwrites.
+pub async fn update_no_orderbook(
+    pool: &PgPool,
+    market_id: Uuid,
+    no_best_ask: Option<rust_decimal::Decimal>,
+    no_best_bid: Option<rust_decimal::Decimal>,
+    no_asks: Option<serde_json::Value>,
+    no_bids: Option<serde_json::Value>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO orderbook_snapshots (market_id, no_best_ask, no_best_bid, no_asks, no_bids, captured_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (market_id) DO UPDATE SET
+            no_best_ask = $2,
+            no_best_bid = $3,
+            no_asks = $4,
+            no_bids = $5,
+            captured_at = NOW()
+        "#,
+        market_id,
+        no_best_ask,
+        no_best_bid,
+        no_asks,
+        no_bids,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Get the latest orderbook snapshot for a market.
 pub async fn get_latest_orderbook_snapshot(
     pool: &PgPool,
