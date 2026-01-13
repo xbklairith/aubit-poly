@@ -1332,8 +1332,8 @@ impl TradeExecutor {
                                 yes_price, live_yes, yes_diff, no_price, live_no, no_diff
                             );
                         info!(
-                                "[SEQUENTIAL] Using sequential placement, priority side: {:?}, live prices: YES=${}, NO=${}",
-                                priority_side, live_yes, live_no
+                                "[SEQUENTIAL] Using sequential placement, priority side: {:?} (will use detection prices YES=${}, NO=${})",
+                                priority_side, yes_price, no_price
                             );
                         Some((priority_side, live_yes, live_no))
                     } else {
@@ -1478,18 +1478,20 @@ impl TradeExecutor {
             }
             _ => {
                 // Both sides - check if we should use sequential or simultaneous placement
-                if let Some((priority_side, live_yes_price, live_no_price)) =
-                    use_sequential_placement
-                {
+                if let Some((priority_side, _live_yes, _live_no)) = use_sequential_placement {
                     // ==========================================
                     // SEQUENTIAL PLACEMENT (price mismatch detected)
                     // ==========================================
+                    // Note: Live prices used only for mismatch detection.
+                    // Orders placed at DETECTION prices to maintain profitability.
                     info!(
-                        "[SEQUENTIAL] Starting sequential placement, priority: {:?}",
-                        priority_side
+                        "[SEQUENTIAL] Starting sequential placement, priority: {:?}, using detection prices: YES=${}, NO=${}",
+                        priority_side, yes_price, no_price
                     );
 
                     // Determine first and second order parameters based on priority
+                    // Use DETECTION prices (not live) - these are what make the spread profitable
+                    // Live prices are only used to detect mismatch and determine priority side
                     let (
                         first_token_id,
                         first_size,
@@ -1503,21 +1505,21 @@ impl TradeExecutor {
                         OrderSide::Yes => (
                             &opportunity.yes_token_id,
                             yes_size,
-                            live_yes_price, // Use live price!
+                            yes_price, // Use detection price (profitable)
                             "YES",
                             &opportunity.no_token_id,
                             no_size,
-                            live_no_price,
+                            no_price,
                             "NO",
                         ),
                         OrderSide::No => (
                             &opportunity.no_token_id,
                             no_size,
-                            live_no_price, // Use live price!
+                            no_price, // Use detection price (profitable)
                             "NO",
                             &opportunity.yes_token_id,
                             yes_size,
-                            live_yes_price,
+                            yes_price,
                             "YES",
                         ),
                     };
