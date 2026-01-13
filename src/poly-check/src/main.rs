@@ -1,10 +1,11 @@
-//! Polymarket API credential verification, balance, positions, and P&L check.
+//! Polymarket API credential verification, balance, positions, P&L, and audit check.
 //!
 //! Usage:
-//!   poly-check              # Verify credentials, show balance and positions
-//!   poly-check --balance    # Show balance only
-//!   poly-check --positions  # Show positions only
-//!   poly-check --pnl        # Show profit & loss report
+//!   poly-check                 # Verify credentials, show balance and positions
+//!   poly-check --balance       # Show balance only
+//!   poly-check --positions     # Show positions only
+//!   poly-check --pnl           # Show profit & loss report
+//!   poly-check --audit-prices  # Audit orderbook price data quality
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -12,10 +13,12 @@ use std::str::FromStr;
 use alloy::signers::local::LocalSigner;
 use alloy::signers::Signer;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::Parser;
 use polymarket_client_sdk::clob::types::{BalanceAllowanceRequest, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -62,6 +65,18 @@ struct Args {
     /// Show all markets (no limit)
     #[arg(long)]
     all: bool,
+
+    /// Audit orderbook price data quality (DB vs depth vs live API)
+    #[arg(long)]
+    audit_prices: bool,
+
+    /// Max markets to audit (default: 10)
+    #[arg(long, default_value = "10")]
+    audit_limit: i64,
+
+    /// Assets to audit (comma-separated, e.g., BTC,ETH,SOL)
+    #[arg(long, default_value = "BTC,ETH,SOL,XRP")]
+    audit_assets: String,
 }
 
 #[tokio::main]
@@ -356,8 +371,262 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Run audit if requested
+    if args.audit_prices {
+        run_audit_prices(&args).await?;
+    }
+
     println!("\n{}", "=".repeat(50));
     println!("Done!");
 
     Ok(())
+}
+
+/// CLOB book response for a single token.
+#[derive(Debug, Deserialize)]
+struct ClobBook {
+    market: Option<String>,
+    asset_id: String,
+    bids: Vec<ClobPriceLevel>,
+    asks: Vec<ClobPriceLevel>,
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClobPriceLevel {
+    price: String,
+    size: String,
+}
+
+impl ClobBook {
+    fn best_bid(&self) -> Option<Decimal> {
+        self.bids
+            .iter()
+            .filter_map(|p| p.price.parse::<Decimal>().ok())
+            .max()
+    }
+
+    fn best_ask(&self) -> Option<Decimal> {
+        self.asks
+            .iter()
+            .filter_map(|p| p.price.parse::<Decimal>().ok())
+            .min()
+    }
+}
+
+/// Audit orderbook price data quality.
+/// Cross-checks: DB scalar prices vs DB depth arrays vs live CLOB API.
+async fn run_audit_prices(args: &Args) -> Result<()> {
+    println!("\n{}", "=".repeat(50));
+    println!("Orderbook Price Data Quality Audit");
+    println!("{}", "=".repeat(50));
+
+    // Create HTTP client
+    let http_client = reqwest::Client::new();
+
+    // Connect to database
+    let config = common::Config::from_env()?;
+    let db = common::Database::connect(&config).await?;
+
+    // Parse assets
+    let assets: Vec<String> = args.audit_assets.split(',').map(|s| s.trim().to_string()).collect();
+    println!("\nAuditing assets: {:?}", assets);
+    println!("Max markets: {}", args.audit_limit);
+
+    // Step 1: Get list of active markets from DB (just market info, no orderbook requirement)
+    let all_markets = common::get_active_markets_expiring_within(
+        db.pool(),
+        1,  // 1 hour expiry
+        args.audit_limit,
+    )
+    .await?;
+
+    // Filter by assets
+    let markets: Vec<_> = if assets.iter().any(|a| a.eq_ignore_ascii_case("ALL")) {
+        all_markets
+    } else {
+        all_markets.into_iter().filter(|m| assets.contains(&m.asset)).collect()
+    };
+
+    if markets.is_empty() {
+        println!("\n  No active markets found.");
+        return Ok(());
+    }
+
+    println!("\nFound {} active markets to audit", markets.len());
+
+    let mut total_checked = 0;
+    let mut db_consistency_errors = 0;
+    let mut api_mismatch_count = 0;
+
+    for market in markets.iter().take(args.audit_limit as usize) {
+        total_checked += 1;
+        println!("\n{}", "-".repeat(50));
+        println!("Market: {}", &market.name[..market.name.len().min(50)]);
+        println!("  Condition: {}", market.condition_id);
+        println!("  Asset: {}, Expiry: {}", market.asset, market.end_time);
+
+        // Step 1: Fetch live API first (slower operation)
+        println!("\n  Fetching live orderbook from CLOB API...");
+        let api_start = std::time::Instant::now();
+        let yes_book = fetch_clob_book(&http_client, &market.yes_token_id).await;
+        let no_book = fetch_clob_book(&http_client, &market.no_token_id).await;
+        let api_elapsed_ms = api_start.elapsed().as_millis();
+
+        // Step 2: Immediately fetch fresh DB snapshot (fast, minimizes time skew)
+        let db_start = std::time::Instant::now();
+        let snapshot = common::get_latest_orderbook_snapshot(db.pool(), market.id).await?;
+        let db_elapsed_ms = db_start.elapsed().as_millis();
+
+        println!("  API fetch: {}ms, DB fetch: {}ms", api_elapsed_ms, db_elapsed_ms);
+
+        if let Some(snap) = snapshot {
+            let age_secs = (Utc::now() - snap.captured_at).num_seconds();
+            println!("  DB snapshot age: {}s", age_secs);
+
+            // Step 3: Compare API vs DB (minimal time skew now)
+            println!("\n  DB Prices:");
+            println!("    YES: ask={:?}, bid={:?}", snap.yes_best_ask, snap.yes_best_bid);
+            println!("    NO:  ask={:?}, bid={:?}", snap.no_best_ask, snap.no_best_bid);
+
+            if let Ok(yes_book) = yes_book {
+                let live_yes_ask = yes_book.best_ask();
+                let live_yes_bid = yes_book.best_bid();
+                println!("  Live YES: ask={:?}, bid={:?}", live_yes_ask, live_yes_bid);
+
+                if !prices_match(snap.yes_best_ask, live_yes_ask) {
+                    println!("    ⚠️  YES ASK mismatch: DB {:?} vs Live {:?}", snap.yes_best_ask, live_yes_ask);
+                    api_mismatch_count += 1;
+                }
+                if !prices_match(snap.yes_best_bid, live_yes_bid) {
+                    println!("    ⚠️  YES BID mismatch: DB {:?} vs Live {:?}", snap.yes_best_bid, live_yes_bid);
+                }
+            } else {
+                println!("  ⚠️  Failed to fetch YES book: {:?}", yes_book.err());
+            }
+
+            if let Ok(no_book) = no_book {
+                let live_no_ask = no_book.best_ask();
+                let live_no_bid = no_book.best_bid();
+                println!("  Live NO:  ask={:?}, bid={:?}", live_no_ask, live_no_bid);
+
+                if !prices_match(snap.no_best_ask, live_no_ask) {
+                    println!("    ⚠️  NO ASK mismatch: DB {:?} vs Live {:?}", snap.no_best_ask, live_no_ask);
+                    api_mismatch_count += 1;
+                }
+                if !prices_match(snap.no_best_bid, live_no_bid) {
+                    println!("    ⚠️  NO BID mismatch: DB {:?} vs Live {:?}", snap.no_best_bid, live_no_bid);
+                }
+            } else {
+                println!("  ⚠️  Failed to fetch NO book: {:?}", no_book.err());
+            }
+
+            // Step 4: DB consistency check (scalar vs depth)
+            let (yes_depth_ask, yes_depth_bid) = extract_best_from_depth(&snap.yes_asks, &snap.yes_bids);
+            let (no_depth_ask, no_depth_bid) = extract_best_from_depth(&snap.no_asks, &snap.no_bids);
+
+            let yes_ask_match = prices_match(snap.yes_best_ask, yes_depth_ask);
+            let yes_bid_match = prices_match(snap.yes_best_bid, yes_depth_bid);
+            let no_ask_match = prices_match(snap.no_best_ask, no_depth_ask);
+            let no_bid_match = prices_match(snap.no_best_bid, no_depth_bid);
+
+            if !yes_ask_match || !yes_bid_match || !no_ask_match || !no_bid_match {
+                println!("\n  ❌ DB CONSISTENCY ERROR: scalar != depth");
+                println!("    Depth-derived: YES ask={:?} bid={:?}, NO ask={:?} bid={:?}",
+                    yes_depth_ask, yes_depth_bid, no_depth_ask, no_depth_bid);
+                db_consistency_errors += 1;
+            } else {
+                println!("\n  ✅ DB consistency OK (scalar matches depth)");
+            }
+        } else {
+            println!("  ⚠️  No snapshot found in DB");
+        }
+
+        // Rate limit API calls
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // Summary
+    println!("\n{}", "=".repeat(50));
+    println!("Audit Summary:");
+    println!("  Markets checked: {}", total_checked);
+    println!("  DB consistency errors: {}", db_consistency_errors);
+    println!("  API mismatch count: {}", api_mismatch_count);
+
+    if db_consistency_errors > 0 {
+        println!("\n  ❌ CRITICAL: DB has scalar/depth inconsistencies!");
+    }
+    if api_mismatch_count > 0 {
+        println!("\n  ⚠️  Some DB prices differ from live API (expected if market is moving)");
+    }
+    if db_consistency_errors == 0 && api_mismatch_count == 0 {
+        println!("\n  ✅ All checks passed!");
+    }
+
+    Ok(())
+}
+
+/// Extract best ask/bid from JSONB depth arrays.
+fn extract_best_from_depth(
+    asks: &Option<serde_json::Value>,
+    bids: &Option<serde_json::Value>,
+) -> (Option<Decimal>, Option<Decimal>) {
+    let best_ask = asks.as_ref().and_then(|v| {
+        v.as_array().and_then(|arr| {
+            arr.iter()
+                .filter_map(|level| {
+                    level.get("price").and_then(|p| {
+                        p.as_str()
+                            .and_then(|s| s.parse::<Decimal>().ok())
+                            .or_else(|| p.as_f64().map(|f| Decimal::from_f64_retain(f).unwrap_or_default()))
+                    })
+                })
+                .min()
+        })
+    });
+
+    let best_bid = bids.as_ref().and_then(|v| {
+        v.as_array().and_then(|arr| {
+            arr.iter()
+                .filter_map(|level| {
+                    level.get("price").and_then(|p| {
+                        p.as_str()
+                            .and_then(|s| s.parse::<Decimal>().ok())
+                            .or_else(|| p.as_f64().map(|f| Decimal::from_f64_retain(f).unwrap_or_default()))
+                    })
+                })
+                .max()
+        })
+    });
+
+    (best_ask, best_bid)
+}
+
+/// Check if two optional prices match (within tolerance for floating point).
+fn prices_match(a: Option<Decimal>, b: Option<Decimal>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() < Decimal::new(1, 4), // 0.0001 tolerance
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Fetch orderbook from CLOB REST API.
+async fn fetch_clob_book(
+    http_client: &reqwest::Client,
+    token_id: &str,
+) -> Result<ClobBook> {
+    let url = format!("{}/book?token_id={}", CLOB_HOST, token_id);
+    let resp = http_client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to fetch CLOB book")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("CLOB API error: {}", resp.status());
+    }
+
+    let book: ClobBook = resp.json().await.context("Failed to parse CLOB book")?;
+    Ok(book)
 }

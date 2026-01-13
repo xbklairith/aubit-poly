@@ -13,6 +13,9 @@ name = "place-order"
 path = "src/bin/place_order.rs"
 
 [dependencies]
+# Internal crate
+common = { path = "../common" }
+
 # Polymarket SDK
 polymarket-client-sdk = "0.1"
 
@@ -44,3 +47,6 @@ serde_json = { workspace = true }
 
 # Decimal
 rust_decimal = { workspace = true }
+
+# Time
+chrono = { workspace = true }

@@ -10,10 +10,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use common::{
-    deactivate_expired_markets, insert_orderbook_snapshot, upsert_market, Config, Database,
-    GammaClient,
-};
+use common::{deactivate_expired_markets, upsert_market, Config, Database, GammaClient};
 
 /// Market Scanner - discovers and tracks prediction markets
 #[derive(Parser, Debug)]
@@ -99,46 +96,18 @@ async fn scan_markets(gamma: &GammaClient, db: &Database) -> Result<ScanStats> {
     let markets = gamma.fetch_supported_markets().await?;
     info!("Fetched {} supported markets", markets.len());
 
-    // Upsert each market and insert initial price snapshot
+    // Upsert each market (orderbook data comes from orderbook-stream, not here)
     let mut upserted = 0;
-    let mut snapshots_added = 0;
     for market in &markets {
         match upsert_market(db.pool(), market).await {
-            Ok(market_id) => {
+            Ok(_market_id) => {
                 upserted += 1;
-
-                // Insert initial orderbook snapshot with prices from Gamma API
-                if market.yes_best_ask.is_some() || market.yes_best_bid.is_some() {
-                    if let Err(e) = insert_orderbook_snapshot(
-                        db.pool(),
-                        market_id,
-                        market.yes_best_ask,
-                        market.yes_best_bid,
-                        market.no_best_ask,
-                        market.no_best_bid,
-                        None, // yes_asks - not available from Gamma
-                        None, // yes_bids
-                        None, // no_asks
-                        None, // no_bids
-                        None, // event_timestamp - use DB NOW()
-                    )
-                    .await
-                    {
-                        warn!(
-                            "Failed to insert snapshot for market {}: {}",
-                            market.condition_id, e
-                        );
-                    } else {
-                        snapshots_added += 1;
-                    }
-                }
             }
             Err(e) => {
                 warn!("Failed to upsert market {}: {}", market.condition_id, e);
             }
         }
     }
-    info!("Added {} initial price snapshots", snapshots_added);
 
     // Deactivate expired markets
     let expired = deactivate_expired_markets(db.pool()).await?;

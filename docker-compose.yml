@@ -66,6 +66,28 @@ services:
     entrypoint: ["poly-check"]
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+    profiles:
+      - tools
+    networks:
+      - aubit-net
+
+  audit-prices:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: audit-prices
+    entrypoint: ["poly-check"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: >
+      --audit-prices
+      --audit-limit 20
+      --audit-assets BTC,ETH,SOL,XRP
     profiles:
       - tools
     networks:
