@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at\n            FROM orderbook_snapshots\n            WHERE captured_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.end_time > NOW()\n          AND m.end_time <= $2\n        ORDER BY m.end_time ASC\n        ",
+  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at\n            FROM orderbook_snapshots\n            WHERE yes_updated_at > $1\n              AND no_updated_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.end_time > NOW()\n          AND m.end_time <= $2\n        ORDER BY m.end_time ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -103,5 +103,5 @@
       true
     ]
   },
-  "hash": "c5463cef40c3f8858c867363c732cf98ea4b7d61f63d3738499ed4f161c5a3b6"
+  "hash": "431f3b72317387b7e911982d1d75772c03beee5c2b236512c4cdc4a44cd68eef"
 }

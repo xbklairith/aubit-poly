@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE orderbook_snapshots\n        SET no_best_ask = $2,\n            no_best_bid = $3,\n            captured_at = NOW(),\n            no_updated_at = $4\n        WHERE market_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e491c7b8a08a1c2dba902697c17e13fa27a37955ebe250eaa7b5898841e3a7ef"
+}
