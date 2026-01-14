@@ -1,8 +1,7 @@
 //! Expiry Scalper - Bets on strongly-skewed crypto markets near expiry.
 //!
 //! Strategy: When a market is expiring soon (3 min) and price is skewed:
-//! - Price > 0.70 → Buy YES (betting it stays high)
-//! - Price < 0.30 → Buy NO (betting it stays low)
+//! - Price > 0.75 → Buy YES (betting it stays high)
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -29,8 +28,6 @@ const CLOB_HOST: &str = "https://clob.polymarket.com";
 const ORDER_TIMEOUT_SECS: u64 = 30;
 /// Maximum allowed shares per order (sanity check)
 const MAX_SHARES: Decimal = dec!(99.99);
-/// Maximum price deviation from 1.0 for YES+NO sum
-const MAX_PRICE_DEVIATION: Decimal = dec!(0.10);
 
 /// Expiry Scalper - bets on skewed markets near expiry
 #[derive(Parser, Debug)]
@@ -42,7 +39,7 @@ struct Args {
     interval_secs: u64,
 
     /// Expiry window in minutes (markets expiring within this time)
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value = "3")]
     expiry_minutes: i64,
 
     /// Position size in USDC
@@ -50,12 +47,8 @@ struct Args {
     position_size: f64,
 
     /// High price threshold (buy YES if price > this)
-    #[arg(long, default_value = "0.70")]
+    #[arg(long, default_value = "0.75")]
     high_threshold: f64,
-
-    /// Low price threshold (buy NO if price < this)
-    #[arg(long, default_value = "0.30")]
-    low_threshold: f64,
 
     /// Maximum orderbook age in seconds
     #[arg(long, default_value = "30")]
@@ -94,14 +87,8 @@ fn validate_args(args: &Args) -> Result<()> {
     if args.position_size > 10000.0 {
         bail!("position_size cannot exceed 10000");
     }
-    if args.high_threshold <= args.low_threshold {
-        bail!("high_threshold must be greater than low_threshold");
-    }
     if args.high_threshold > 1.0 || args.high_threshold < 0.0 {
         bail!("high_threshold must be between 0 and 1");
-    }
-    if args.low_threshold > 1.0 || args.low_threshold < 0.0 {
-        bail!("low_threshold must be between 0 and 1");
     }
     Ok(())
 }
@@ -123,10 +110,7 @@ async fn main() -> Result<()> {
     info!("=== Expiry Scalper ===");
     info!("Expiry window: {} minutes", args.expiry_minutes);
     info!("Position size: ${}", args.position_size);
-    info!(
-        "Thresholds: buy YES if > {}, buy NO if < {}",
-        args.high_threshold, args.low_threshold
-    );
+    info!("Threshold: buy YES if > {}", args.high_threshold);
     info!("Assets: {}", args.assets);
     info!("Poll interval: {}s", args.interval_secs);
     info!("Dry run: {}", args.dry_run);
@@ -138,11 +122,9 @@ async fn main() -> Result<()> {
 
     info!("Connected to database");
 
-    // Convert thresholds to Decimal
+    // Convert threshold to Decimal
     let high_threshold = Decimal::try_from(args.high_threshold)
         .context("Invalid high_threshold")?;
-    let low_threshold = Decimal::try_from(args.low_threshold)
-        .context("Invalid low_threshold")?;
     let position_size = Decimal::try_from(args.position_size)
         .context("Invalid position_size")?;
 
@@ -177,7 +159,6 @@ async fn main() -> Result<()> {
                 &assets,
                 &args,
                 high_threshold,
-                low_threshold,
                 position_size,
                 &mut traded_markets,
                 &mut cached_auth,
@@ -198,7 +179,6 @@ async fn run_cycle(
     assets: &[String],
     args: &Args,
     high_threshold: Decimal,
-    low_threshold: Decimal,
     position_size: Decimal,
     traded_markets: &mut HashSet<Uuid>,
     cached_auth: &mut Option<CachedAuth>,
@@ -245,41 +225,16 @@ async fn run_cycle(
             }
         };
 
-        // Determine action based on price
-        let (side, token_id, price) = if yes_price > high_threshold {
-            // Price > 0.70 → Buy YES
-            ("YES", &market.yes_token_id, yes_price)
-        } else if yes_price < low_threshold {
-            // Price < 0.30 → Buy NO
-            // Validate NO price exists and prices sum to ~1.0
-            let no_price = match market.no_best_ask {
-                Some(p) if p > dec!(0) && p <= dec!(1) => p,
-                _ => {
-                    debug!("Skipping {} - invalid NO ask price: {:?}", market.name, market.no_best_ask);
-                    continue;
-                }
-            };
-
-            // Validate price relationship: YES + NO should be close to 1.0
-            let price_sum = yes_price + no_price;
-            let deviation = (price_sum - dec!(1)).abs();
-            if deviation > MAX_PRICE_DEVIATION {
-                warn!(
-                    "Skipping {} - price mismatch: YES={} + NO={} = {} (deviation {})",
-                    market.name, yes_price, no_price, price_sum, deviation
-                );
-                continue;
-            }
-
-            ("NO", &market.no_token_id, no_price)
-        } else {
-            // Price in neutral zone (0.30 - 0.70), skip
+        // Only buy YES when price > threshold
+        if yes_price <= high_threshold {
             debug!(
-                "Skipping {} - price {} in neutral zone",
-                market.name, yes_price
+                "Skipping {} - price {} below threshold {}",
+                market.name, yes_price, high_threshold
             );
             continue;
-        };
+        }
+
+        let (side, token_id, price) = ("YES", &market.yes_token_id, yes_price);
 
         // Calculate shares to buy with sanity check
         if price < dec!(0.01) {

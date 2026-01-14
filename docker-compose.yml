@@ -71,10 +71,9 @@ services:
       RUST_LOG: info
     command: >
       --interval-secs 10
-      --expiry-minutes 2
+      --expiry-minutes 3
       --position-size 5
-      --high-threshold 0.70
-      --low-threshold 0.30
+      --high-threshold 0.75
     restart: unless-stopped
     networks:
       - aubit-net

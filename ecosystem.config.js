@@ -111,8 +111,8 @@ module.exports = {
         DATABASE_URL: DATABASE_URL,
       },
       // Bet on skewed crypto markets near expiry (3 min)
-      // $5 position size, thresholds: >0.70 buy YES, <0.30 buy NO
-      args: '--interval-secs 10 --expiry-minutes 3 --position-size 5 --high-threshold 0.70 --low-threshold 0.30',
+      // $5 position size, threshold: >0.75 buy YES
+      args: '--interval-secs 10 --expiry-minutes 3 --position-size 5 --high-threshold 0.75',
     },
 
     // Python Trade Executor Service (for comparison)
