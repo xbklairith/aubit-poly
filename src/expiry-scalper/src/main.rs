@@ -61,6 +61,10 @@ struct Args {
     /// Dry run mode (no actual trades)
     #[arg(long)]
     dry_run: bool,
+
+    /// Limit price for orders (place at this price to ensure fill)
+    #[arg(long, default_value = "0.99")]
+    limit_price: f64,
 }
 
 /// Cached authentication state
@@ -90,6 +94,9 @@ fn validate_args(args: &Args) -> Result<()> {
     if args.high_threshold > 1.0 || args.high_threshold < 0.0 {
         bail!("high_threshold must be between 0 and 1");
     }
+    if args.limit_price > 0.99 || args.limit_price < 0.01 {
+        bail!("limit_price must be between 0.01 and 0.99");
+    }
     Ok(())
 }
 
@@ -110,7 +117,8 @@ async fn main() -> Result<()> {
     info!("=== Expiry Scalper ===");
     info!("Expiry window: {} minutes", args.expiry_minutes);
     info!("Position size: ${}", args.position_size);
-    info!("Threshold: buy YES if > {}", args.high_threshold);
+    info!("Threshold: buy if price >= {}", args.high_threshold);
+    info!("Limit price: {} (order placed at this price)", args.limit_price);
     info!("Assets: {}", args.assets);
     info!("Poll interval: {}s", args.interval_secs);
     info!("Dry run: {}", args.dry_run);
@@ -127,6 +135,8 @@ async fn main() -> Result<()> {
         .context("Invalid high_threshold")?;
     let position_size = Decimal::try_from(args.position_size)
         .context("Invalid position_size")?;
+    let limit_price = Decimal::try_from(args.limit_price)
+        .context("Invalid limit_price")?;
 
     // Track markets we've already bet on
     let mut traded_markets: HashSet<Uuid> = HashSet::new();
@@ -160,6 +170,7 @@ async fn main() -> Result<()> {
                 &args,
                 high_threshold,
                 position_size,
+                limit_price,
                 &mut traded_markets,
                 &mut cached_auth,
             ) => {}
@@ -180,6 +191,7 @@ async fn run_cycle(
     args: &Args,
     high_threshold: Decimal,
     position_size: Decimal,
+    limit_price: Decimal,
     traded_markets: &mut HashSet<Uuid>,
     cached_auth: &mut Option<CachedAuth>,
 ) {
@@ -237,7 +249,7 @@ async fn run_cycle(
         // Determine which side to trade based on threshold (>= 0.75)
         // Buy YES if YES price >= threshold (strong YES signal)
         // Buy NO if NO price >= threshold (strong NO signal)
-        let (side, token_id, price) = if yes_price >= high_threshold {
+        let (side, token_id, market_price) = if yes_price >= high_threshold {
             ("YES", &market.yes_token_id, yes_price)
         } else if no_price >= high_threshold {
             ("NO", &market.no_token_id, no_price)
@@ -249,18 +261,19 @@ async fn run_cycle(
             continue;
         };
 
-        // Calculate shares to buy with sanity check
-        if price < dec!(0.01) {
-            warn!("Skipping {} - price {} too low", market.name, price);
+        // Sanity check on market price
+        if market_price < dec!(0.01) {
+            warn!("Skipping {} - market price {} too low", market.name, market_price);
             continue;
         }
 
-        if price > dec!(0.99) {
-            warn!("Skipping {} - price {} too high (max 0.99)", market.name, price);
+        if market_price > dec!(0.99) {
+            warn!("Skipping {} - market price {} too high", market.name, market_price);
             continue;
         }
 
-        let shares = position_size / price;
+        // Calculate shares based on market price (expected fill price)
+        let shares = position_size / market_price;
 
         if shares > MAX_SHARES {
             warn!(
@@ -271,29 +284,29 @@ async fn run_cycle(
         }
 
         info!(
-            "[SIGNAL] {} {} @ ${} ({} shares) - expires {:?}",
-            side, market.name, price, shares, market.end_time
+            "[SIGNAL] {} {} - market @ ${}, order @ ${} ({} shares) - expires {:?}",
+            side, market.name, market_price, limit_price, shares, market.end_time
         );
 
         if args.dry_run {
-            info!("[DRY RUN] Would place order: {} {} @ ${}", side, shares, price);
+            info!("[DRY RUN] Would place order: {} {} shares @ ${} (market: ${})", side, shares, limit_price, market_price);
             traded_markets.insert(market.id);
             continue;
         }
 
-        // Execute trade
+        // Execute trade at limit_price (not market price) to ensure fill
         match execute_trade(
             cached_auth,
             token_id,
             shares,
-            price,
+            limit_price,
             side,
             &market.name,
         )
         .await
         {
             Ok(_) => {
-                info!("[SUCCESS] Placed {} order for {}", side, market.name);
+                info!("[SUCCESS] Placed {} order for {} @ ${}", side, market.name, limit_price);
                 traded_markets.insert(market.id);
             }
             Err(e) => {
