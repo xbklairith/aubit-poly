@@ -222,7 +222,7 @@ async fn run_cycle(
         }
     };
 
-    debug!(
+    info!(
         "Found {} markets expiring within {} minutes",
         markets.len(),
         args.expiry_minutes
@@ -355,6 +355,11 @@ async fn execute_trade(
 ) -> Result<()> {
     // Ensure authenticated
     let auth = ensure_authenticated(cached_auth).await?;
+
+    // Normalize price and shares to remove trailing zeros
+    // Polymarket SDK requires price decimal places <= tick size decimal places
+    let price = price.normalize();
+    let shares = shares.round_dp(2); // Round shares to 2 decimal places
 
     // Build order
     info!(
