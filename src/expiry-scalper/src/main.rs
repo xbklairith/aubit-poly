@@ -28,7 +28,7 @@ use common::{get_markets_with_fresh_orderbooks, Config, Database};
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const ORDER_TIMEOUT_SECS: u64 = 30;
 /// Maximum allowed shares per order (sanity check)
-const MAX_SHARES: Decimal = dec!(100000);
+const MAX_SHARES: Decimal = dec!(99.99);
 /// Maximum price deviation from 1.0 for YES+NO sum
 const MAX_PRICE_DEVIATION: Decimal = dec!(0.10);
 
@@ -284,6 +284,11 @@ async fn run_cycle(
         // Calculate shares to buy with sanity check
         if price < dec!(0.01) {
             warn!("Skipping {} - price {} too low", market.name, price);
+            continue;
+        }
+
+        if price > dec!(0.99) {
+            warn!("Skipping {} - price {} too high (max 0.99)", market.name, price);
             continue;
         }
 
