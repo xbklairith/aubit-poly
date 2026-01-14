@@ -96,6 +96,25 @@ module.exports = {
       args: '--dry-run --interval-ms 1000 --verbose-timing --assets BTC,ETH,SOL,XRP,UNKNOWN --max-time-to-expiry 5184000 --max-orderbook-age 30 --min-profit 0.02',
     },
 
+    // Rust Expiry Scalper Service
+    {
+      name: 'expiry-scalper',
+      script: './target/release/expiry-scalper',
+      interpreter: 'none',
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      min_uptime: '10s',
+      restart_delay: 5000,
+      env: {
+        RUST_LOG: 'info',
+        DATABASE_URL: DATABASE_URL,
+      },
+      // Bet on skewed crypto markets near expiry (3 min)
+      // $5 position size, thresholds: >0.70 buy YES, <0.30 buy NO
+      args: '--interval-secs 10 --expiry-minutes 3 --position-size 5 --high-threshold 0.70 --low-threshold 0.30',
+    },
+
     // Python Trade Executor Service (for comparison)
     {
       name: 'trade-executor-py',

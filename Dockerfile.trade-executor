@@ -11,12 +11,14 @@ COPY src/market-scanner/Cargo.toml src/market-scanner/Cargo.toml
 COPY src/orderbook-stream/Cargo.toml src/orderbook-stream/Cargo.toml
 COPY src/trade-executor/Cargo.toml src/trade-executor/Cargo.toml
 COPY src/poly-check/Cargo.toml src/poly-check/Cargo.toml
+COPY src/expiry-scalper/Cargo.toml src/expiry-scalper/Cargo.toml
 # Create dummy source files for cargo metadata to work
 RUN mkdir -p src/common/src && echo "" > src/common/src/lib.rs && \
     mkdir -p src/market-scanner/src && echo "fn main(){}" > src/market-scanner/src/main.rs && \
     mkdir -p src/orderbook-stream/src && echo "fn main(){}" > src/orderbook-stream/src/main.rs && \
     mkdir -p src/trade-executor/src && echo "fn main(){}" > src/trade-executor/src/main.rs && \
-    mkdir -p src/poly-check/src && echo "fn main(){}" > src/poly-check/src/main.rs
+    mkdir -p src/poly-check/src && echo "fn main(){}" > src/poly-check/src/main.rs && \
+    mkdir -p src/expiry-scalper/src && echo "fn main(){}" > src/expiry-scalper/src/main.rs
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Builder stage - build dependencies (cached) then app
@@ -50,5 +52,6 @@ COPY --from=builder /app/target/release/market-scanner /usr/local/bin/
 COPY --from=builder /app/target/release/orderbook-stream /usr/local/bin/
 COPY --from=builder /app/target/release/poly-check /usr/local/bin/
 COPY --from=builder /app/target/release/place-order /usr/local/bin/
+COPY --from=builder /app/target/release/expiry-scalper /usr/local/bin/
 
 ENTRYPOINT ["trade-executor"]

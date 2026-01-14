@@ -22,4 +22,5 @@ pub use repository::{
     get_latest_orderbook_snapshot, get_market_by_condition_id, get_markets_with_fresh_orderbooks,
     get_priority_markets_hybrid, insert_orderbook_snapshot, update_no_best_prices,
     update_no_orderbook, update_yes_best_prices, update_yes_orderbook, upsert_market,
+    MarketWithPrices,
 };
