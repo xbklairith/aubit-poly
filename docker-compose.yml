@@ -71,7 +71,7 @@ services:
       RUST_LOG: info
     command: >
       --interval-secs 10
-      --expiry-minutes 3
+      --expiry-minutes 2
       --position-size 5
       --high-threshold 0.70
       --low-threshold 0.30

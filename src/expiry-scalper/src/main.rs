@@ -42,7 +42,7 @@ struct Args {
     interval_secs: u64,
 
     /// Expiry window in minutes (markets expiring within this time)
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "2")]
     expiry_minutes: i64,
 
     /// Position size in USDC
