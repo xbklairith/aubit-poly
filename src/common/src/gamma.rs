@@ -353,11 +353,38 @@ impl GammaClient {
     }
 
     /// Fetch and filter markets for supported types.
-    /// Uses fetch_all_binary_markets to get all two-outcome markets (not just Up/Down).
+    /// Combines fetch_all_binary_markets (general events) with fetch_markets (crypto series)
+    /// to ensure we get all crypto up/down markets that might be beyond the 5000 event limit.
     pub async fn fetch_supported_markets(&self) -> Result<Vec<ParsedMarket>, GammaError> {
-        let markets = self.fetch_all_binary_markets().await?;
+        use std::collections::HashSet;
 
-        let parsed: Vec<ParsedMarket> = markets
+        // Fetch general binary markets (has 5000 event limit)
+        let general_markets = self.fetch_all_binary_markets().await?;
+
+        // Also fetch crypto series markets (queries by series_id, no limit issues)
+        let crypto_markets = self.fetch_markets().await?;
+
+        // Combine and deduplicate by condition_id
+        let mut seen_conditions: HashSet<String> = HashSet::new();
+        let mut all_markets = Vec::new();
+
+        // Add crypto markets first (they're the priority)
+        for market in crypto_markets {
+            if !market.condition_id.is_empty() && seen_conditions.insert(market.condition_id.clone()) {
+                all_markets.push(market);
+            }
+        }
+
+        // Add general markets (skip duplicates)
+        for market in general_markets {
+            if !market.condition_id.is_empty() && seen_conditions.insert(market.condition_id.clone()) {
+                all_markets.push(market);
+            }
+        }
+
+        info!("Combined {} total markets (deduped)", all_markets.len());
+
+        let parsed: Vec<ParsedMarket> = all_markets
             .into_iter()
             .filter_map(|m| self.parse_market(m))
             .collect();
