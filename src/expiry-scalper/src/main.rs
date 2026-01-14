@@ -225,16 +225,29 @@ async fn run_cycle(
             }
         };
 
-        // Only buy YES when price > threshold
-        if yes_price <= high_threshold {
+        // Get NO price (ask price to buy NO)
+        let no_price = match market.no_best_ask {
+            Some(p) if p > dec!(0) && p <= dec!(1) => p,
+            _ => {
+                debug!("Skipping {} - invalid NO ask price: {:?}", market.name, market.no_best_ask);
+                continue;
+            }
+        };
+
+        // Determine which side to trade based on threshold (>= 0.75)
+        // Buy YES if YES price >= threshold (strong YES signal)
+        // Buy NO if NO price >= threshold (strong NO signal)
+        let (side, token_id, price) = if yes_price >= high_threshold {
+            ("YES", &market.yes_token_id, yes_price)
+        } else if no_price >= high_threshold {
+            ("NO", &market.no_token_id, no_price)
+        } else {
             debug!(
-                "Skipping {} - price {} below threshold {}",
-                market.name, yes_price, high_threshold
+                "Skipping {} - YES {} and NO {} both below threshold {}",
+                market.name, yes_price, no_price, high_threshold
             );
             continue;
-        }
-
-        let (side, token_id, price) = ("YES", &market.yes_token_id, yes_price);
+        };
 
         // Calculate shares to buy with sanity check
         if price < dec!(0.01) {
