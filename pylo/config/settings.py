@@ -110,6 +110,61 @@ class Settings(BaseSettings):
     # JSON log file path
     spread_bot_log_file: str = "logs/spread_bot_trades.json"
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Edge Trader Bot Settings (Probability Gap Trading)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Enable/disable the edge trader bot
+    edge_trader_enabled: bool = False
+
+    # Dry run mode (simulate trades without execution)
+    edge_trader_dry_run: bool = True
+
+    # Probability estimation settings
+    edge_trader_lookback_periods: int = Field(default=10, ge=3, le=100)
+    edge_trader_momentum_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    # Edge thresholds
+    edge_trader_min_edge: Decimal = Decimal("0.05")  # 5% minimum edge to trade
+    edge_trader_min_confidence: Decimal = Decimal("0.5")  # Skip low-confidence signals
+
+    # Position sizing (Kelly-based)
+    edge_trader_kelly_fraction: Decimal = Decimal("0.25")  # Use 25% Kelly
+    edge_trader_max_position_pct: Decimal = Decimal("0.10")  # Max 10% bankroll per trade
+    edge_trader_max_total_exposure: Decimal = Decimal("500")  # Max total exposure
+
+    # Starting balance for dry-run simulation
+    edge_trader_starting_balance: Decimal = Decimal("10000")
+
+    # Expiry confidence adjustment multipliers
+    edge_trader_early_confidence_mult: Decimal = Decimal("0.6")   # >80% time remaining
+    edge_trader_sweet_spot_confidence: Decimal = Decimal("1.0")   # 20-80% time remaining
+    edge_trader_late_confidence_mult: Decimal = Decimal("0.8")    # 7-20% time remaining
+    edge_trader_near_expiry_mult: Decimal = Decimal("0.4")        # <7% time remaining
+
+    # Trading fee rate (for EV calculations)
+    edge_trader_fee_rate: Decimal = Decimal("0.02")  # 2% Polymarket fee
+
+    # Target timeframes (comma-separated)
+    edge_trader_timeframes: str = "15min"  # 15-minute markets
+
+    # Target assets (comma-separated)
+    edge_trader_assets: str = "BTC,ETH,SOL"
+
+    # Poll interval in seconds
+    edge_trader_poll_interval: int = Field(default=5, ge=1, le=60)
+
+    # JSON log file path
+    edge_trader_log_file: str = "logs/edge_trader_signals.json"
+
+    def get_edge_trader_assets(self) -> list[str]:
+        """Get list of assets for edge trader."""
+        return [a.strip().upper() for a in self.edge_trader_assets.split(",") if a.strip()]
+
+    def get_edge_trader_timeframes(self) -> list[str]:
+        """Get list of timeframes for edge trader."""
+        return [t.strip().lower() for t in self.edge_trader_timeframes.split(",") if t.strip()]
+
     def get_spread_bot_assets(self) -> list[str]:
         """Get list of assets to monitor."""
         return [a.strip().upper() for a in self.spread_bot_assets.split(",") if a.strip()]

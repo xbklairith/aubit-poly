@@ -188,3 +188,121 @@ def odds_from_probability(probability: Decimal) -> Decimal:
     if probability == 0:
         return Decimal("0")
     return Decimal("1") / probability
+
+
+def kelly_for_binary_market(
+    true_probability: Decimal,
+    market_price: Decimal,
+    fee_rate: Decimal = Decimal("0"),
+) -> Decimal:
+    """
+    Calculate Kelly Criterion for a binary market (YES/NO at $1 payout).
+
+    For buying at price P with true probability p:
+    Kelly = (p - P_effective) / (1 - P_effective)
+
+    Where P_effective accounts for fees on winnings.
+
+    Args:
+        true_probability: Estimated true probability of winning
+        market_price: Current market price (0-1)
+        fee_rate: Fee rate applied to winnings (e.g., 0.02 = 2%)
+
+    Returns:
+        Optimal fraction of bankroll to bet (0 if no edge)
+    """
+    if market_price >= Decimal("1") or market_price <= Decimal("0"):
+        return Decimal("0")
+
+    # Calculate break-even probability accounting for fees
+    # To break even: p × (1 - fee) × $1 = price
+    # So: p_breakeven = price / (1 - fee)
+    effective_price = market_price / (Decimal("1") - fee_rate)
+
+    # No edge if true probability is below break-even
+    if true_probability <= effective_price:
+        return Decimal("0")
+
+    # Kelly = (p - P_eff) / (1 - P_eff)
+    kelly = (true_probability - effective_price) / (Decimal("1") - effective_price)
+
+    return max(Decimal("0"), kelly)
+
+
+def edge_expected_value(
+    true_probability: Decimal,
+    market_price: Decimal,
+    bet_amount: Decimal = Decimal("1"),
+    fee_rate: Decimal = Decimal("0"),
+) -> Decimal:
+    """
+    Calculate expected value of betting on a binary outcome.
+
+    EV = P(win) × payout - P(lose) × cost
+    Where payout = $1 - market_price (net profit on win)
+    And cost = market_price (total loss on lose)
+
+    Accounting for fees on winnings.
+
+    Args:
+        true_probability: Estimated true probability of winning
+        market_price: Current market price to buy
+        bet_amount: Amount to bet (in USD)
+        fee_rate: Fee rate on winnings
+
+    Returns:
+        Expected value per bet (positive = profitable)
+    """
+    # Win: get $1 payout, paid market_price, minus fees on profit
+    profit_on_win = Decimal("1") - market_price
+    fee_on_win = profit_on_win * fee_rate
+    net_win = profit_on_win - fee_on_win
+
+    # Lose: lose the market_price paid
+    loss_on_lose = market_price
+
+    # EV = P(win) × net_win - P(lose) × loss
+    ev = (true_probability * net_win) - ((Decimal("1") - true_probability) * loss_on_lose)
+
+    return ev * bet_amount
+
+
+def break_even_probability(
+    market_price: Decimal,
+    fee_rate: Decimal = Decimal("0"),
+) -> Decimal:
+    """
+    Calculate break-even probability for a binary market bet.
+
+    To break even: P(true) > market_price / (1 - fee_rate)
+
+    Args:
+        market_price: Current market price
+        fee_rate: Fee rate on winnings
+
+    Returns:
+        Minimum probability needed to break even
+    """
+    if fee_rate >= Decimal("1"):
+        return Decimal("1")  # Can never break even with 100%+ fees
+
+    return market_price / (Decimal("1") - fee_rate)
+
+
+def calculate_edge(
+    true_probability: Decimal,
+    market_price: Decimal,
+) -> Decimal:
+    """
+    Calculate raw edge (probability gap).
+
+    Edge = P(true) - P(market)
+
+    Args:
+        true_probability: Estimated true probability
+        market_price: Market implied probability (price)
+
+    Returns:
+        Edge (positive = favorable, negative = unfavorable)
+    """
+    return true_probability - market_price

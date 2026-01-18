@@ -24,8 +24,8 @@ use uuid::Uuid;
 
 use common::{
     get_15m_updown_markets_with_fresh_orderbooks, get_market_resolutions_batch,
-    get_markets_with_fresh_orderbooks, upsert_market_resolution, Config, Database,
-    GammaClient, MarketResolutionInsert,
+    get_markets_with_fresh_orderbooks, upsert_market_resolution, Config, Database, GammaClient,
+    MarketResolutionInsert,
 };
 
 /// Simulated position for dry-run portfolio tracking
@@ -39,9 +39,9 @@ struct SimulatedPosition {
     timeframe: String,
     yes_token_id: String,
     no_token_id: String,
-    side: String,         // "YES" or "NO" - the side we bet on
+    side: String, // "YES" or "NO" - the side we bet on
     shares: Decimal,
-    entry_price: Decimal, // Limit order price (e.g., 0.99)
+    entry_price: Decimal,  // Limit order price (e.g., 0.99)
     market_price: Decimal, // Actual orderbook price of bet side
     cost: Decimal,
     end_time: DateTime<Utc>,
@@ -106,8 +106,8 @@ impl DryRunPortfolio {
             let winning_side = if let Some(ws) = resolution_map.get(&pos.market_id) {
                 ws.clone()
             } else {
-                // Fetch from Gamma API
-                match gamma.fetch_market_resolution(&pos.condition_id).await {
+                // Fetch from Gamma API using token_id (condition_id doesn't work with /markets endpoint)
+                match gamma.fetch_market_resolution(&pos.yes_token_id).await {
                     Ok(Some(ws)) => {
                         let ws_upper = ws.to_uppercase();
                         info!(
@@ -345,7 +345,10 @@ async fn main() -> Result<()> {
     info!("Expiry window: {} minutes", args.expiry_minutes);
     info!("Position size: ${}", args.position_size);
     info!("Threshold: buy if price >= {}", args.high_threshold);
-    info!("Limit price: {} (order placed at this price)", args.limit_price);
+    info!(
+        "Limit price: {} (order placed at this price)",
+        args.limit_price
+    );
     info!("Assets: {}", args.assets);
     info!("Poll interval: {}s", args.interval_secs);
     info!("Dry run: {}", args.dry_run);
@@ -364,12 +367,10 @@ async fn main() -> Result<()> {
     info!("Connected to database");
 
     // Convert threshold to Decimal
-    let high_threshold = Decimal::try_from(args.high_threshold)
-        .context("Invalid high_threshold")?;
-    let position_size = Decimal::try_from(args.position_size)
-        .context("Invalid position_size")?;
-    let limit_price = Decimal::try_from(args.limit_price)
-        .context("Invalid limit_price")?;
+    let high_threshold =
+        Decimal::try_from(args.high_threshold).context("Invalid high_threshold")?;
+    let position_size = Decimal::try_from(args.position_size).context("Invalid position_size")?;
+    let limit_price = Decimal::try_from(args.limit_price).context("Invalid limit_price")?;
 
     // Track markets we've already bet on
     let mut traded_markets: HashSet<Uuid> = HashSet::new();
@@ -385,7 +386,8 @@ async fn main() -> Result<()> {
     let mut cycle_count: u32 = 0;
 
     // Parse assets from CLI
-    let assets: Vec<String> = args.assets
+    let assets: Vec<String> = args
+        .assets
         .split(',')
         .map(|s| s.trim().to_uppercase())
         .filter(|s| !s.is_empty())
@@ -520,7 +522,10 @@ async fn run_cycle(
         let yes_price = match market.yes_best_ask {
             Some(p) if p > dec!(0) && p <= dec!(1) => p,
             _ => {
-                debug!("Skipping {} - invalid YES ask price: {:?}", market.name, market.yes_best_ask);
+                debug!(
+                    "Skipping {} - invalid YES ask price: {:?}",
+                    market.name, market.yes_best_ask
+                );
                 continue;
             }
         };
@@ -529,7 +534,10 @@ async fn run_cycle(
         let no_price = match market.no_best_ask {
             Some(p) if p > dec!(0) && p <= dec!(1) => p,
             _ => {
-                debug!("Skipping {} - invalid NO ask price: {:?}", market.name, market.no_best_ask);
+                debug!(
+                    "Skipping {} - invalid NO ask price: {:?}",
+                    market.name, market.no_best_ask
+                );
                 continue;
             }
         };
@@ -569,11 +577,17 @@ async fn run_cycle(
         // Sanity check on order price (only for non-contrarian)
         if !args.contrarian {
             if order_price < dec!(0.01) {
-                warn!("Skipping {} - market price {} too low", market.name, order_price);
+                warn!(
+                    "Skipping {} - market price {} too low",
+                    market.name, order_price
+                );
                 continue;
             }
             if order_price > dec!(0.99) {
-                warn!("Skipping {} - market price {} too high", market.name, order_price);
+                warn!(
+                    "Skipping {} - market price {} too high",
+                    market.name, order_price
+                );
                 continue;
             }
         }
@@ -591,17 +605,33 @@ async fn run_cycle(
             continue;
         }
 
-        let mode_label = if args.contrarian { "CONTRARIAN" } else { "SIGNAL" };
+        let mode_label = if args.contrarian {
+            "CONTRARIAN"
+        } else {
+            "SIGNAL"
+        };
         info!(
             "[{}] {} {} @ ${:.2} ({:.2} shares, ${:.2}) - YES={}, NO={} - expires {:?}",
-            mode_label, side, market.name, market_price, shares, position_size, yes_price, no_price, market.end_time
+            mode_label,
+            side,
+            market.name,
+            market_price,
+            shares,
+            position_size,
+            yes_price,
+            no_price,
+            market.end_time
         );
 
         if args.dry_run {
             let cost = shares * market_price; // Actual cost at market price
             info!(
                 "[DRY RUN] {} {:.2} shares @ ${} (limit: ${}) -> Win: ${:.2}",
-                side, shares, market_price, order_price, shares - cost
+                side,
+                shares,
+                market_price,
+                order_price,
+                shares - cost
             );
 
             // Add to simulated portfolio
@@ -638,13 +668,16 @@ async fn run_cycle(
         .await
         {
             Ok(order_id) => {
-                info!("[SUCCESS] Placed {} order {} for {} @ ${}", side, order_id, market.name, order_price);
+                info!(
+                    "[SUCCESS] Placed {} order {} for {} @ ${}",
+                    side, order_id, market.name, order_price
+                );
                 traded_markets.insert(market.id);
 
                 // Schedule cancellation if configured
                 if args.cancel_after_secs > 0 {
-                    let cancel_at = Utc::now()
-                        + chrono::Duration::seconds(args.cancel_after_secs as i64);
+                    let cancel_at =
+                        Utc::now() + chrono::Duration::seconds(args.cancel_after_secs as i64);
                     pending_cancels.push(PendingCancel {
                         order_id,
                         market_name: market.name.clone(),
@@ -665,9 +698,7 @@ async fn run_cycle(
     // Cleanup expired markets from tracking set
     let now = Utc::now();
     let before_count = traded_markets.len();
-    traded_markets.retain(|id| {
-        markets.iter().any(|m| m.id == *id && m.end_time > now)
-    });
+    traded_markets.retain(|id| markets.iter().any(|m| m.id == *id && m.end_time > now));
     let cleaned = before_count - traded_markets.len();
     if cleaned > 0 {
         debug!("Cleaned {} expired markets from tracking set", cleaned);
@@ -797,7 +828,11 @@ async fn execute_trade(
 
     // Check result (post_order returns Vec<PostOrderResponse>)
     if let Some(order) = result.first() {
-        let has_error = order.error_msg.as_ref().map(|e| !e.is_empty()).unwrap_or(false);
+        let has_error = order
+            .error_msg
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
         if !order.order_id.is_empty() && !has_error {
             info!(
                 "[TRADE] Order placed successfully: {} (order_id: {})",

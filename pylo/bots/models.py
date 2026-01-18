@@ -1,11 +1,10 @@
 """Data models for the spread arbitrage bot."""
 
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
-import uuid
 
 
 class Asset(str, Enum):
@@ -72,7 +71,7 @@ class UpDownMarket:
     # Metadata
     volume: Decimal = Decimal("0")
     liquidity: Decimal = Decimal("0")
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
 
     @property
     def spread(self) -> Decimal:
@@ -92,7 +91,7 @@ class UpDownMarket:
     @property
     def time_to_expiry(self) -> float:
         """Seconds until market expires."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return (self.end_time - now).total_seconds()
 
     @property
@@ -130,7 +129,7 @@ class SpreadOpportunity:
     no_price: Decimal = Decimal("0")
     spread: Decimal = Decimal("0")
     profit_pct: Decimal = Decimal("0")
-    detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -151,7 +150,7 @@ class Trade:
     """A single trade (buy or sell)."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     market_id: str = ""
     market_name: str = ""
     side: str = ""  # "YES" or "NO"
@@ -187,7 +186,7 @@ class Position:
     market_id: str = ""
     market_name: str = ""
     asset: Asset = Asset.BTC
-    end_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    end_time: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # Position details
     yes_shares: Decimal = Decimal("0")
@@ -198,11 +197,11 @@ class Position:
 
     # Status
     status: PositionStatus = PositionStatus.OPEN
-    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    exit_time: Optional[datetime] = None
+    entry_time: datetime = field(default_factory=lambda: datetime.now(UTC))
+    exit_time: datetime | None = None
 
     # Settlement
-    settled_outcome: Optional[str] = None  # "YES" or "NO"
+    settled_outcome: str | None = None  # "YES" or "NO"
     payout: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
 
@@ -249,12 +248,95 @@ class Position:
 
 
 @dataclass
+class ProbabilityEstimate:
+    """Estimated probability with confidence metrics."""
+
+    asset: str
+    timeframe: Timeframe
+    probability_up: Decimal
+    probability_down: Decimal
+    confidence: Decimal
+    momentum_score: Decimal
+    volatility: Decimal
+    sample_size: int
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "asset": self.asset,
+            "timeframe": self.timeframe.value,
+            "probability_up": str(self.probability_up),
+            "probability_down": str(self.probability_down),
+            "confidence": str(self.confidence),
+            "momentum_score": str(self.momentum_score),
+            "volatility": str(self.volatility),
+            "sample_size": self.sample_size,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+
+@dataclass
+class EdgeOpportunity:
+    """Detected edge opportunity for trading."""
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    market: UpDownMarket = field(default=None)  # type: ignore
+    probability_estimate: ProbabilityEstimate = field(default=None)  # type: ignore
+
+    # Edge metrics
+    edge: Decimal = Decimal("0")  # P(true) - P(market)
+    expected_value: Decimal = Decimal("0")  # EV per dollar bet
+    recommended_side: str = ""  # "UP" or "DOWN"
+    recommended_size: Decimal = Decimal("0")  # As fraction of bankroll
+
+    # Confidence
+    raw_confidence: Decimal = Decimal("0")
+    adjusted_confidence: Decimal = Decimal("0")  # After expiry adjustment
+
+    # Metadata
+    time_to_expiry_seconds: int = 0
+    detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def is_tradeable(self) -> bool:
+        """Check if opportunity should be traded."""
+        return (
+            self.recommended_side in ("UP", "DOWN")
+            and self.expected_value > Decimal("0")
+            and self.recommended_size > Decimal("0")
+        )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "market_id": self.market.id if self.market else None,
+            "market_name": self.market.name if self.market else None,
+            "asset": self.market.asset.value if self.market else None,
+            "edge": str(self.edge),
+            "expected_value": str(self.expected_value),
+            "recommended_side": self.recommended_side,
+            "recommended_size": str(self.recommended_size),
+            "raw_confidence": str(self.raw_confidence),
+            "adjusted_confidence": str(self.adjusted_confidence),
+            "time_to_expiry_seconds": self.time_to_expiry_seconds,
+            "detected_at": self.detected_at.isoformat(),
+            "probability_estimate": (
+                self.probability_estimate.to_dict()
+                if self.probability_estimate
+                else None
+            ),
+        }
+
+
+@dataclass
 class BotSession:
     """A bot trading session."""
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    ended_at: Optional[datetime] = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    ended_at: datetime | None = None
     dry_run: bool = True
 
     # Balance tracking

@@ -370,14 +370,18 @@ impl GammaClient {
 
         // Add crypto markets first (they're the priority)
         for market in crypto_markets {
-            if !market.condition_id.is_empty() && seen_conditions.insert(market.condition_id.clone()) {
+            if !market.condition_id.is_empty()
+                && seen_conditions.insert(market.condition_id.clone())
+            {
                 all_markets.push(market);
             }
         }
 
         // Add general markets (skip duplicates)
         for market in general_markets {
-            if !market.condition_id.is_empty() && seen_conditions.insert(market.condition_id.clone()) {
+            if !market.condition_id.is_empty()
+                && seen_conditions.insert(market.condition_id.clone())
+            {
                 all_markets.push(market);
             }
         }
@@ -500,17 +504,25 @@ impl GammaClient {
         })
     }
 
-    /// Fetch a market by condition_id and return its resolution if closed.
+    /// Fetch a market by token_id and return its resolution if closed.
     /// Returns (winning_side, outcome_prices) where winning_side is "YES" or "NO".
+    ///
+    /// Note: Uses the clob_token_ids query parameter since /markets/{id} only accepts
+    /// numeric IDs, not condition_id hex values.
     pub async fn fetch_market_resolution(
         &self,
-        condition_id: &str,
+        token_id: &str,
     ) -> Result<Option<String>, GammaError> {
-        let url = format!("{}/markets/{}", self.base_url, condition_id);
+        let url = format!("{}/markets", self.base_url);
 
-        debug!("Fetching market resolution for condition_id={}", condition_id);
+        debug!("Fetching market resolution for token_id={}", token_id);
 
-        let response = self.client.get(&url).send().await?;
+        let response = self
+            .client
+            .get(&url)
+            .query(&[("clob_token_ids", token_id)])
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
@@ -522,11 +534,18 @@ impl GammaClient {
             )));
         }
 
-        let market: GammaMarket = response.json().await?;
+        let markets: Vec<GammaMarket> = response.json().await?;
+        let market = match markets.into_iter().next() {
+            Some(m) => m,
+            None => {
+                debug!("No market found for token_id={}", token_id);
+                return Ok(None);
+            }
+        };
 
         // Check if market is closed/resolved
         if !market.closed.unwrap_or(false) {
-            debug!("Market {} is not yet closed", condition_id);
+            debug!("Market {} is not yet closed", token_id);
             return Ok(None);
         }
 
@@ -553,19 +572,16 @@ impl GammaClient {
                     };
 
                     // Check which outcome won (price = "1" means winner)
-                    if let (Ok(p0), Ok(p1)) = (
-                        prices[0].parse::<f64>(),
-                        prices[1].parse::<f64>(),
-                    ) {
+                    if let (Ok(p0), Ok(p1)) = (prices[0].parse::<f64>(), prices[1].parse::<f64>()) {
                         if p0 > 0.5 {
                             // First outcome won
                             let winning = if yes_idx == 0 { "YES" } else { "NO" };
-                            debug!("Market {} resolved to {}", condition_id, winning);
+                            debug!("Market {} resolved to {}", token_id, winning);
                             return Ok(Some(winning.to_string()));
                         } else if p1 > 0.5 {
                             // Second outcome won
                             let winning = if yes_idx == 1 { "YES" } else { "NO" };
-                            debug!("Market {} resolved to {}", condition_id, winning);
+                            debug!("Market {} resolved to {}", token_id, winning);
                             return Ok(Some(winning.to_string()));
                         }
                     }
@@ -573,7 +589,7 @@ impl GammaClient {
             }
         }
 
-        debug!("Could not determine resolution for market {}", condition_id);
+        debug!("Could not determine resolution for market {}", token_id);
         Ok(None)
     }
 }
