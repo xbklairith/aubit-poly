@@ -23,9 +23,159 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use common::{
-    get_15m_updown_markets_with_fresh_orderbooks, get_markets_with_fresh_orderbooks, Config,
-    Database,
+    get_15m_updown_markets_with_fresh_orderbooks, get_market_resolutions_batch,
+    get_markets_with_fresh_orderbooks, Config, Database,
 };
+
+/// Simulated position for dry-run portfolio tracking
+#[derive(Debug, Clone)]
+struct SimulatedPosition {
+    market_id: Uuid,
+    market_name: String,
+    side: String, // "YES" or "NO"
+    shares: Decimal,
+    entry_price: Decimal,
+    cost: Decimal,
+    end_time: DateTime<Utc>,
+    entered_at: DateTime<Utc>,
+}
+
+/// Dry-run portfolio tracker
+#[derive(Debug, Default)]
+struct DryRunPortfolio {
+    positions: Vec<SimulatedPosition>,
+    total_invested: Decimal,
+    total_pnl: Decimal,
+    realized_wins: u32,
+    realized_losses: u32,
+    pending_count: u32,
+}
+
+impl DryRunPortfolio {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_position(&mut self, position: SimulatedPosition) {
+        self.total_invested += position.cost;
+        self.pending_count += 1;
+        self.positions.push(position);
+    }
+
+    /// Resolve expired positions and calculate P&L using actual market resolutions
+    /// Returns true if any positions were resolved
+    async fn resolve_expired(&mut self, pool: &sqlx::PgPool) -> bool {
+        let now = Utc::now();
+
+        // Find positions that have expired (with 60s buffer for resolution data)
+        let expired_cutoff = now - chrono::Duration::seconds(60);
+
+        let (expired, active): (Vec<_>, Vec<_>) = self
+            .positions
+            .drain(..)
+            .partition(|p| p.end_time < expired_cutoff);
+
+        self.positions = active;
+
+        if expired.is_empty() {
+            return false;
+        }
+
+        // Query actual resolutions from database
+        let market_ids: Vec<Uuid> = expired.iter().map(|p| p.market_id).collect();
+        let resolutions = match get_market_resolutions_batch(pool, &market_ids).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[PORTFOLIO] Failed to query resolutions: {}", e);
+                // Put positions back - will try again next cycle
+                self.positions.extend(expired);
+                return false;
+            }
+        };
+
+        // Create lookup map
+        let resolution_map: std::collections::HashMap<Uuid, String> = resolutions
+            .into_iter()
+            .map(|r| (r.market_id, r.winning_side.to_uppercase()))
+            .collect();
+
+        let mut resolved_any = false;
+
+        for pos in expired {
+            if let Some(winning_side) = resolution_map.get(&pos.market_id) {
+                resolved_any = true;
+                self.pending_count = self.pending_count.saturating_sub(1);
+
+                // Check if our bet won
+                let we_won = pos.side.to_uppercase() == *winning_side;
+
+                if we_won {
+                    // Win: get $1 per share, profit = shares - cost
+                    let payout = pos.shares;
+                    let profit = payout - pos.cost;
+                    self.total_pnl += profit;
+                    self.realized_wins += 1;
+                    info!(
+                        "[PORTFOLIO] ✅ WIN: {} {} @ ${:.2} -> Profit: ${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pos.entry_price, profit, winning_side
+                    );
+                } else {
+                    // Loss: lose entire stake
+                    let loss = pos.cost;
+                    self.total_pnl -= loss;
+                    self.realized_losses += 1;
+                    info!(
+                        "[PORTFOLIO] ❌ LOSS: {} {} @ ${:.2} -> Loss: -${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pos.entry_price, loss, winning_side
+                    );
+                }
+            } else {
+                // No resolution yet - put back in queue
+                debug!(
+                    "[PORTFOLIO] No resolution yet for {}, will check again",
+                    pos.market_name
+                );
+                self.positions.push(pos);
+            }
+        }
+
+        resolved_any
+    }
+
+    fn print_summary(&self) {
+        let total_trades = self.realized_wins + self.realized_losses;
+        let win_rate = if total_trades > 0 {
+            (self.realized_wins as f64 / total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        info!("╔════════════════════════════════════════════════════════════╗");
+        info!("║              DRY-RUN PORTFOLIO SUMMARY                     ║");
+        info!("╠════════════════════════════════════════════════════════════╣");
+        info!(
+            "║  Total Invested:    ${:<10.2}                           ║",
+            self.total_invested
+        );
+        info!(
+            "║  Realized P&L:      ${:<10.2}                           ║",
+            self.total_pnl
+        );
+        info!(
+            "║  Pending Positions: {:<10}                             ║",
+            self.pending_count
+        );
+        info!(
+            "║  Wins / Losses:     {} / {}                                  ║",
+            self.realized_wins, self.realized_losses
+        );
+        info!(
+            "║  Win Rate:          {:<6.1}%                               ║",
+            win_rate
+        );
+        info!("╚════════════════════════════════════════════════════════════╝");
+    }
+}
 
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const ORDER_TIMEOUT_SECS: u64 = 30;
@@ -176,6 +326,10 @@ async fn main() -> Result<()> {
     // Pending order cancellations
     let mut pending_cancels: Vec<PendingCancel> = Vec::new();
 
+    // Dry-run portfolio tracker
+    let mut portfolio = DryRunPortfolio::new();
+    let mut cycle_count: u32 = 0;
+
     // Parse assets from CLI
     let assets: Vec<String> = args.assets
         .split(',')
@@ -206,11 +360,25 @@ async fn main() -> Result<()> {
                 &mut traded_markets,
                 &mut cached_auth,
                 &mut pending_cancels,
+                &mut portfolio,
             ) => {}
+        }
+
+        cycle_count += 1;
+
+        // Print portfolio summary every 12 cycles (~1 min at 5s interval)
+        if args.dry_run && cycle_count % 12 == 0 {
+            portfolio.print_summary();
         }
 
         // Sleep until next cycle
         tokio::time::sleep(Duration::from_secs(args.interval_secs)).await;
+    }
+
+    // Final portfolio summary on shutdown
+    if args.dry_run {
+        info!("=== FINAL PORTFOLIO STATUS ===");
+        portfolio.print_summary();
     }
 
     info!("Shutdown complete");
@@ -228,8 +396,14 @@ async fn run_cycle(
     traded_markets: &mut HashSet<Uuid>,
     cached_auth: &mut Option<CachedAuth>,
     pending_cancels: &mut Vec<PendingCancel>,
+    portfolio: &mut DryRunPortfolio,
 ) {
     let cycle_start = std::time::Instant::now();
+
+    // Resolve expired positions in dry-run mode
+    if args.dry_run {
+        portfolio.resolve_expired(db.pool()).await;
+    }
 
     // Process pending cancellations first
     if !pending_cancels.is_empty() {
@@ -365,7 +539,24 @@ async fn run_cycle(
         );
 
         if args.dry_run {
-            info!("[DRY RUN] Would place order: {} {} shares @ ${}", side, shares, order_price);
+            let cost = shares * order_price;
+            info!(
+                "[DRY RUN] Would place order: {} {} shares @ ${} (cost: ${:.2})",
+                side, shares, order_price, cost
+            );
+
+            // Add to simulated portfolio
+            portfolio.add_position(SimulatedPosition {
+                market_id: market.id,
+                market_name: market.name.clone(),
+                side: side.to_string(),
+                shares,
+                entry_price: order_price,
+                cost,
+                end_time: market.end_time,
+                entered_at: Utc::now(),
+            });
+
             traded_markets.insert(market.id);
             continue;
         }

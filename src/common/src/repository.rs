@@ -843,6 +843,67 @@ pub async fn close_position(
     Ok(())
 }
 
+/// Market resolution info
+#[derive(Debug, Clone)]
+pub struct MarketResolution {
+    pub market_id: Uuid,
+    pub winning_side: String,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+/// Get market resolution by market_id (joins markets table to get condition_id).
+/// Returns the winning side if the market has been resolved.
+pub async fn get_market_resolution(
+    pool: &PgPool,
+    market_id: Uuid,
+) -> Result<Option<MarketResolution>, sqlx::Error> {
+    let result = sqlx::query_as!(
+        MarketResolution,
+        r#"
+        SELECT
+            m.id as market_id,
+            r.winning_side,
+            r.resolved_at
+        FROM markets m
+        JOIN market_resolutions r ON r.condition_id = m.condition_id
+        WHERE m.id = $1
+        "#,
+        market_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Get market resolutions for multiple market IDs.
+pub async fn get_market_resolutions_batch(
+    pool: &PgPool,
+    market_ids: &[Uuid],
+) -> Result<Vec<MarketResolution>, sqlx::Error> {
+    if market_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let results = sqlx::query_as!(
+        MarketResolution,
+        r#"
+        SELECT
+            m.id as market_id,
+            r.winning_side,
+            r.resolved_at
+        FROM markets m
+        JOIN market_resolutions r ON r.condition_id = m.condition_id
+        WHERE m.id = ANY($1)
+        "#,
+        market_ids
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
