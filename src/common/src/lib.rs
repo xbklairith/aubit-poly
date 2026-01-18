@@ -23,5 +23,5 @@ pub use repository::{
     get_market_resolution, get_market_resolutions_batch, get_markets_with_fresh_orderbooks,
     get_priority_markets_hybrid, insert_orderbook_snapshot, update_no_best_prices,
     update_no_orderbook, update_yes_best_prices, update_yes_orderbook, upsert_market,
-    MarketResolution, MarketWithPrices,
+    upsert_market_resolution, MarketResolution, MarketResolutionInsert, MarketWithPrices,
 };

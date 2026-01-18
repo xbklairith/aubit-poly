@@ -24,18 +24,25 @@ use uuid::Uuid;
 
 use common::{
     get_15m_updown_markets_with_fresh_orderbooks, get_market_resolutions_batch,
-    get_markets_with_fresh_orderbooks, Config, Database,
+    get_markets_with_fresh_orderbooks, upsert_market_resolution, Config, Database,
+    GammaClient, MarketResolutionInsert,
 };
 
 /// Simulated position for dry-run portfolio tracking
 #[derive(Debug, Clone)]
 struct SimulatedPosition {
     market_id: Uuid,
+    condition_id: String,
     market_name: String,
+    market_type: String,
+    asset: String,
+    timeframe: String,
+    yes_token_id: String,
+    no_token_id: String,
     side: String,         // "YES" or "NO" - the side we bet on
     shares: Decimal,
     entry_price: Decimal, // Limit order price (e.g., 0.99)
-    market_price: Decimal, // Actual orderbook price of dominant side
+    market_price: Decimal, // Actual orderbook price of bet side
     cost: Decimal,
     end_time: DateTime<Utc>,
 }
@@ -63,8 +70,8 @@ impl DryRunPortfolio {
     }
 
     /// Resolve expired positions and calculate P&L using actual market resolutions
-    /// Returns true if any positions were resolved
-    async fn resolve_expired(&mut self, pool: &sqlx::PgPool) -> bool {
+    /// Fetches from Gamma API if not in database, then records to database
+    async fn resolve_expired(&mut self, pool: &sqlx::PgPool, gamma: &GammaClient) -> bool {
         let now = Utc::now();
 
         // Find positions that have expired (with 60s buffer for resolution data)
@@ -81,20 +88,13 @@ impl DryRunPortfolio {
             return false;
         }
 
-        // Query actual resolutions from database
+        // First, try to get resolutions from database
         let market_ids: Vec<Uuid> = expired.iter().map(|p| p.market_id).collect();
-        let resolutions = match get_market_resolutions_batch(pool, &market_ids).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("[PORTFOLIO] Failed to query resolutions: {}", e);
-                // Put positions back - will try again next cycle
-                self.positions.extend(expired);
-                return false;
-            }
-        };
+        let db_resolutions = get_market_resolutions_batch(pool, &market_ids)
+            .await
+            .unwrap_or_default();
 
-        // Create lookup map
-        let resolution_map: std::collections::HashMap<Uuid, String> = resolutions
+        let mut resolution_map: std::collections::HashMap<Uuid, String> = db_resolutions
             .into_iter()
             .map(|r| (r.market_id, r.winning_side.to_uppercase()))
             .collect();
@@ -102,50 +102,93 @@ impl DryRunPortfolio {
         let mut resolved_any = false;
 
         for pos in expired {
-            if let Some(winning_side) = resolution_map.get(&pos.market_id) {
-                // Validate winning_side is YES or NO
-                if winning_side != "YES" && winning_side != "NO" {
-                    warn!(
-                        "[PORTFOLIO] Invalid winning_side '{}' for {}, skipping",
-                        winning_side, pos.market_name
-                    );
-                    self.positions.push(pos);
-                    continue;
-                }
-
-                resolved_any = true;
-                self.pending_count = self.pending_count.saturating_sub(1);
-
-                // Check if our bet won
-                let we_won = pos.side.to_uppercase() == *winning_side;
-
-                if we_won {
-                    // Win: get $1 per share, profit = shares - cost
-                    let payout = pos.shares;
-                    let profit = payout - pos.cost;
-                    self.total_pnl += profit;
-                    self.realized_wins += 1;
-                    info!(
-                        "[PORTFOLIO] ✅ WIN: {} {} (mkt: ${:.2}) -> +${:.2} (resolved: {})",
-                        pos.side, pos.market_name, pos.market_price, profit, winning_side
-                    );
-                } else {
-                    // Loss: lose entire stake
-                    let loss = pos.cost;
-                    self.total_pnl -= loss;
-                    self.realized_losses += 1;
-                    info!(
-                        "[PORTFOLIO] ❌ LOSS: {} {} (mkt: ${:.2}) -> -${:.2} (resolved: {})",
-                        pos.side, pos.market_name, pos.market_price, loss, winning_side
-                    );
-                }
+            // Check if we already have resolution from DB
+            let winning_side = if let Some(ws) = resolution_map.get(&pos.market_id) {
+                ws.clone()
             } else {
-                // No resolution yet - put back in queue
-                debug!(
-                    "[PORTFOLIO] No resolution yet for {}, will check again",
-                    pos.market_name
+                // Fetch from Gamma API
+                match gamma.fetch_market_resolution(&pos.condition_id).await {
+                    Ok(Some(ws)) => {
+                        let ws_upper = ws.to_uppercase();
+                        info!(
+                            "[PORTFOLIO] Fetched resolution from API: {} -> {}",
+                            pos.market_name, ws_upper
+                        );
+
+                        // Record to database for future use
+                        let insert = MarketResolutionInsert {
+                            condition_id: pos.condition_id.clone(),
+                            market_type: pos.market_type.clone(),
+                            asset: pos.asset.clone(),
+                            timeframe: pos.timeframe.clone(),
+                            name: pos.market_name.clone(),
+                            yes_token_id: pos.yes_token_id.clone(),
+                            no_token_id: pos.no_token_id.clone(),
+                            winning_side: ws_upper.clone(),
+                            end_time: pos.end_time,
+                        };
+                        if let Err(e) = upsert_market_resolution(pool, &insert).await {
+                            warn!("[PORTFOLIO] Failed to record resolution: {}", e);
+                        }
+
+                        resolution_map.insert(pos.market_id, ws_upper.clone());
+                        ws_upper
+                    }
+                    Ok(None) => {
+                        // Not resolved yet - put back in queue
+                        debug!(
+                            "[PORTFOLIO] Market {} not yet resolved, will check again",
+                            pos.market_name
+                        );
+                        self.positions.push(pos);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[PORTFOLIO] Failed to fetch resolution for {}: {}",
+                            pos.market_name, e
+                        );
+                        self.positions.push(pos);
+                        continue;
+                    }
+                }
+            };
+
+            // Validate winning_side is YES or NO
+            if winning_side != "YES" && winning_side != "NO" {
+                warn!(
+                    "[PORTFOLIO] Invalid winning_side '{}' for {}, skipping",
+                    winning_side, pos.market_name
                 );
                 self.positions.push(pos);
+                continue;
+            }
+
+            resolved_any = true;
+            self.pending_count = self.pending_count.saturating_sub(1);
+
+            // Check if our bet won
+            let we_won = pos.side.to_uppercase() == winning_side;
+
+            if we_won {
+                // Win: get $1 per share, profit = shares - cost
+                let payout = pos.shares;
+                let profit = payout - pos.cost;
+                self.total_pnl += profit;
+                self.realized_wins += 1;
+                info!(
+                    "[PORTFOLIO] ✅ WIN: {} {} (mkt: ${:.2}) -> +${:.2} (resolved: {})",
+                    pos.side, pos.market_name, pos.market_price, profit, winning_side
+                );
+            } else {
+                // Loss: lose entire stake
+                let loss = pos.cost;
+                self.total_pnl -= loss;
+                self.realized_losses += 1;
+                info!(
+                    "[PORTFOLIO] ❌ LOSS: {} {} (mkt: ${:.2}) -> -${:.2} (resolved: {})",
+                    pos.side, pos.market_name, pos.market_price, loss, winning_side
+                );
             }
         }
 
@@ -316,6 +359,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let config = Config::from_env()?;
     let db = Database::connect(&config).await?;
+    let gamma = GammaClient::new(&config);
 
     info!("Connected to database");
 
@@ -362,6 +406,7 @@ async fn main() -> Result<()> {
             }
             _ = run_cycle(
                 &db,
+                &gamma,
                 &assets,
                 &args,
                 high_threshold,
@@ -398,6 +443,7 @@ async fn main() -> Result<()> {
 /// Run a single trading cycle
 async fn run_cycle(
     db: &Database,
+    gamma: &GammaClient,
     assets: &[String],
     args: &Args,
     high_threshold: Decimal,
@@ -412,7 +458,7 @@ async fn run_cycle(
 
     // Resolve expired positions in dry-run mode
     if args.dry_run {
-        portfolio.resolve_expired(db.pool()).await;
+        portfolio.resolve_expired(db.pool(), gamma).await;
     }
 
     // Process pending cancellations first
@@ -561,7 +607,13 @@ async fn run_cycle(
             // Add to simulated portfolio
             portfolio.add_position(SimulatedPosition {
                 market_id: market.id,
+                condition_id: market.condition_id.clone(),
                 market_name: market.name.clone(),
+                market_type: market.market_type.clone(),
+                asset: market.asset.clone(),
+                timeframe: market.timeframe.clone(),
+                yes_token_id: market.yes_token_id.clone(),
+                no_token_id: market.no_token_id.clone(),
                 side: side.to_string(),
                 shares,
                 entry_price: order_price,

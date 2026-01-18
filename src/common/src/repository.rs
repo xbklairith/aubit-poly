@@ -851,6 +851,51 @@ pub struct MarketResolution {
     pub resolved_at: Option<DateTime<Utc>>,
 }
 
+/// Input for inserting a market resolution
+#[derive(Debug, Clone)]
+pub struct MarketResolutionInsert {
+    pub condition_id: String,
+    pub market_type: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub name: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub winning_side: String,
+    pub end_time: DateTime<Utc>,
+}
+
+/// Insert or update a market resolution.
+pub async fn upsert_market_resolution(
+    pool: &PgPool,
+    resolution: &MarketResolutionInsert,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO market_resolutions (
+            condition_id, market_type, asset, timeframe, name,
+            yes_token_id, no_token_id, winning_side, end_time, resolved_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (condition_id) DO UPDATE SET
+            winning_side = EXCLUDED.winning_side,
+            resolved_at = NOW()
+        "#,
+        resolution.condition_id,
+        resolution.market_type,
+        resolution.asset,
+        resolution.timeframe,
+        resolution.name,
+        resolution.yes_token_id,
+        resolution.no_token_id,
+        resolution.winning_side,
+        resolution.end_time,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Get market resolution by market_id (joins markets table to get condition_id).
 /// Returns the winning side if the market has been resolved.
 pub async fn get_market_resolution(

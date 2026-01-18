@@ -499,6 +499,83 @@ impl GammaClient {
             no_best_ask,
         })
     }
+
+    /// Fetch a market by condition_id and return its resolution if closed.
+    /// Returns (winning_side, outcome_prices) where winning_side is "YES" or "NO".
+    pub async fn fetch_market_resolution(
+        &self,
+        condition_id: &str,
+    ) -> Result<Option<String>, GammaError> {
+        let url = format!("{}/markets/{}", self.base_url, condition_id);
+
+        debug!("Fetching market resolution for condition_id={}", condition_id);
+
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            if response.status().as_u16() == 404 {
+                return Ok(None);
+            }
+            return Err(GammaError::ApiError(format!(
+                "API returned status: {}",
+                response.status()
+            )));
+        }
+
+        let market: GammaMarket = response.json().await?;
+
+        // Check if market is closed/resolved
+        if !market.closed.unwrap_or(false) {
+            debug!("Market {} is not yet closed", condition_id);
+            return Ok(None);
+        }
+
+        // Try to get resolution from outcome_prices
+        // Format: ["1", "0"] means first outcome (YES/Up) won
+        // Format: ["0", "1"] means second outcome (NO/Down) won
+        if let Some(prices_str) = &market.outcome_prices {
+            if let Ok(prices) = serde_json::from_str::<Vec<String>>(prices_str) {
+                if prices.len() == 2 {
+                    // Parse outcomes to determine which is YES/NO
+                    let outcomes = market.parse_outcomes().unwrap_or_default();
+                    let (yes_idx, _no_idx) = if outcomes.len() == 2 {
+                        let yes_pos = outcomes.iter().position(|o| {
+                            let lower = o.to_lowercase();
+                            lower == "yes" || lower == "up" || lower == "higher" || lower == "above"
+                        });
+                        let no_pos = outcomes.iter().position(|o| {
+                            let lower = o.to_lowercase();
+                            lower == "no" || lower == "down" || lower == "lower" || lower == "below"
+                        });
+                        (yes_pos.unwrap_or(0), no_pos.unwrap_or(1))
+                    } else {
+                        (0, 1)
+                    };
+
+                    // Check which outcome won (price = "1" means winner)
+                    if let (Ok(p0), Ok(p1)) = (
+                        prices[0].parse::<f64>(),
+                        prices[1].parse::<f64>(),
+                    ) {
+                        if p0 > 0.5 {
+                            // First outcome won
+                            let winning = if yes_idx == 0 { "YES" } else { "NO" };
+                            debug!("Market {} resolved to {}", condition_id, winning);
+                            return Ok(Some(winning.to_string()));
+                        } else if p1 > 0.5 {
+                            // Second outcome won
+                            let winning = if yes_idx == 1 { "YES" } else { "NO" };
+                            debug!("Market {} resolved to {}", condition_id, winning);
+                            return Ok(Some(winning.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("Could not determine resolution for market {}", condition_id);
+        Ok(None)
+    }
 }
 
 /// Extract cryptocurrency asset from market question.
