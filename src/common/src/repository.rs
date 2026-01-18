@@ -571,6 +571,63 @@ pub async fn get_markets_with_fresh_orderbooks(
     Ok(results)
 }
 
+/// Get 15-minute up/down markets with fresh orderbooks.
+/// Used by the contrarian scalper to target specific market types.
+pub async fn get_15m_updown_markets_with_fresh_orderbooks(
+    pool: &PgPool,
+    max_age_seconds: i32,
+    assets: &[String],
+    max_expiry_seconds: i64,
+) -> Result<Vec<MarketWithPrices>, sqlx::Error> {
+    let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
+    let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+
+    let results = sqlx::query_as!(
+        MarketWithPrices,
+        r#"
+        SELECT
+            m.id,
+            m.condition_id,
+            m.market_type,
+            m.asset,
+            m.timeframe,
+            m.yes_token_id,
+            m.no_token_id,
+            m.name,
+            m.end_time,
+            COALESCE(m.is_active, true) as "is_active!",
+            o.yes_best_ask,
+            o.yes_best_bid,
+            o.no_best_ask,
+            o.no_best_bid,
+            o.captured_at as "captured_at!"
+        FROM markets m
+        INNER JOIN (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
+            FROM orderbook_snapshots
+            WHERE yes_updated_at > $1
+              AND no_updated_at > $1
+            ORDER BY market_id, captured_at DESC
+        ) o ON o.market_id = m.id
+        WHERE m.is_active = true
+          AND m.asset = ANY($2)
+          AND m.timeframe = '15m'
+          AND m.market_type = 'up_down'
+          AND m.end_time > NOW()
+          AND m.end_time <= $3
+        ORDER BY m.end_time ASC
+        "#,
+        snapshot_cutoff,
+        assets,
+        expiry_cutoff,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results)
+}
+
 /// Get all markets with fresh orderbooks (no asset filter).
 pub async fn get_all_markets_with_fresh_orderbooks(
     pool: &PgPool,

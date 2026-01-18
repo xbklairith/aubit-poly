@@ -11,29 +11,24 @@ dependencies = [
     "pydantic>=2.9.0",
     "pydantic-settings>=2.5.0",
     "python-dotenv>=1.0.0",
-
     # Crypto Exchanges
     "ccxt>=4.4.0",
     "python-binance>=1.0.19",
-
     # Stock/Options Data
     "yfinance>=0.2.49",
     "pandas>=2.2.0",
-
     # Database
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.20.0",
     "asyncpg>=0.30.0",
     "greenlet>=3.0.0",
-
     # Alerts (optional)
     "aiohttp>=3.10.0",
-
     # Async utilities
     "asyncio-throttle>=1.0.2",
-
     # Blockchain (for position redemption)
     "web3>=7.0.0",
+    "matplotlib>=3.10.8",
 ]
 
 [project.optional-dependencies]

@@ -58,11 +58,31 @@ services:
     networks:
       - aubit-net
 
-  expiry-scalper:
+  # expiry-scalper:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.trade-executor
+  #   container_name: expiry-scalper
+  #   entrypoint: ["expiry-scalper"]
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+  #     RUST_LOG: info
+  #   command: >
+  #     --interval-secs 10
+  #     --expiry-minutes 3
+  #     --position-size 5
+  #     --high-threshold 0.75
+  #   restart: unless-stopped
+  #   networks:
+  #     - aubit-net
+
+  contrarian-scalper:
     build:
       context: .
       dockerfile: Dockerfile.trade-executor
-    container_name: expiry-scalper
+    container_name: contrarian-scalper
     entrypoint: ["expiry-scalper"]
     env_file:
       - .env
@@ -70,10 +90,13 @@ services:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
       RUST_LOG: info
     command: >
-      --interval-secs 10
-      --expiry-minutes 3
-      --position-size 5
-      --high-threshold 0.75
+      --interval-secs 5
+      --expiry-minutes 1
+      --position-size 1
+      --limit-price 0.99
+      --high-threshold 0.70
+      --contrarian
+      --only-15m-updown
     restart: unless-stopped
     networks:
       - aubit-net

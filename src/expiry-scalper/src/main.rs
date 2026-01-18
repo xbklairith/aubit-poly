@@ -22,12 +22,24 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use common::{get_markets_with_fresh_orderbooks, Config, Database};
+use common::{
+    get_15m_updown_markets_with_fresh_orderbooks, get_markets_with_fresh_orderbooks, Config,
+    Database,
+};
 
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const ORDER_TIMEOUT_SECS: u64 = 30;
+const CANCEL_TIMEOUT_SECS: u64 = 10;
 /// Maximum allowed shares per order (sanity check)
 const MAX_SHARES: Decimal = dec!(99.99);
+
+/// Pending order cancellation.
+#[derive(Debug, Clone)]
+struct PendingCancel {
+    order_id: String,
+    market_name: String,
+    cancel_at: DateTime<Utc>,
+}
 
 /// Expiry Scalper - bets on skewed markets near expiry
 #[derive(Parser, Debug)]
@@ -65,6 +77,18 @@ struct Args {
     /// Limit price for orders (place at this price to ensure fill)
     #[arg(long, default_value = "0.99")]
     limit_price: f64,
+
+    /// Contrarian mode: bet AGAINST the skewed side
+    #[arg(long)]
+    contrarian: bool,
+
+    /// Only trade 15-minute up/down markets
+    #[arg(long)]
+    only_15m_updown: bool,
+
+    /// Auto-cancel unfilled orders after this many seconds (0 = no cancel)
+    #[arg(long, default_value = "0")]
+    cancel_after_secs: u64,
 }
 
 /// Cached authentication state
@@ -122,6 +146,11 @@ async fn main() -> Result<()> {
     info!("Assets: {}", args.assets);
     info!("Poll interval: {}s", args.interval_secs);
     info!("Dry run: {}", args.dry_run);
+    info!("Contrarian mode: {}", args.contrarian);
+    info!("Only 15m up/down: {}", args.only_15m_updown);
+    if args.cancel_after_secs > 0 {
+        info!("Auto-cancel after: {}s", args.cancel_after_secs);
+    }
 
     // Load config and connect to database
     dotenvy::dotenv().ok();
@@ -143,6 +172,9 @@ async fn main() -> Result<()> {
 
     // Cached authentication
     let mut cached_auth: Option<CachedAuth> = None;
+
+    // Pending order cancellations
+    let mut pending_cancels: Vec<PendingCancel> = Vec::new();
 
     // Parse assets from CLI
     let assets: Vec<String> = args.assets
@@ -173,6 +205,7 @@ async fn main() -> Result<()> {
                 limit_price,
                 &mut traded_markets,
                 &mut cached_auth,
+                &mut pending_cancels,
             ) => {}
         }
 
@@ -194,23 +227,48 @@ async fn run_cycle(
     limit_price: Decimal,
     traded_markets: &mut HashSet<Uuid>,
     cached_auth: &mut Option<CachedAuth>,
+    pending_cancels: &mut Vec<PendingCancel>,
 ) {
     let cycle_start = std::time::Instant::now();
 
+    // Process pending cancellations first
+    if !pending_cancels.is_empty() {
+        process_pending_cancels(cached_auth, pending_cancels).await;
+    }
+
     // Query markets expiring within the window
     let expiry_seconds = args.expiry_minutes * 60;
-    let markets = match get_markets_with_fresh_orderbooks(
-        db.pool(),
-        args.max_orderbook_age,
-        assets,
-        expiry_seconds,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            error!("Failed to query markets: {:#}", e);
-            return;
+    let markets = if args.only_15m_updown {
+        // Use filtered query for 15m up/down markets only
+        match get_15m_updown_markets_with_fresh_orderbooks(
+            db.pool(),
+            args.max_orderbook_age,
+            assets,
+            expiry_seconds,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Failed to query 15m up/down markets: {:#}", e);
+                return;
+            }
+        }
+    } else {
+        // Use general query for all markets
+        match get_markets_with_fresh_orderbooks(
+            db.pool(),
+            args.max_orderbook_age,
+            assets,
+            expiry_seconds,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                error!("Failed to query markets: {:#}", e);
+                return;
+            }
         }
     };
 
@@ -246,34 +304,51 @@ async fn run_cycle(
             }
         };
 
-        // Determine which side to trade based on threshold (>= 0.75)
-        // Buy YES if YES price >= threshold (strong YES signal)
-        // Buy NO if NO price >= threshold (strong NO signal)
-        let (side, token_id, market_price) = if yes_price >= high_threshold {
-            ("YES", &market.yes_token_id, yes_price)
-        } else if no_price >= high_threshold {
-            ("NO", &market.no_token_id, no_price)
+        // Determine which side to trade based on threshold and mode
+        let (side, token_id, order_price) = if args.contrarian {
+            // Contrarian mode: bet AGAINST the skewed side at low price
+            if yes_price >= high_threshold {
+                // YES is skewed high, bet on NO at limit_price
+                ("NO", &market.no_token_id, limit_price)
+            } else if no_price >= high_threshold {
+                // NO is skewed high, bet on YES at limit_price
+                ("YES", &market.yes_token_id, limit_price)
+            } else {
+                debug!(
+                    "Skipping {} - YES {} and NO {} both below threshold {} (contrarian)",
+                    market.name, yes_price, no_price, high_threshold
+                );
+                continue;
+            }
         } else {
-            debug!(
-                "Skipping {} - YES {} and NO {} both below threshold {}",
-                market.name, yes_price, no_price, high_threshold
-            );
-            continue;
+            // Normal mode: bet WITH the skewed side
+            if yes_price >= high_threshold {
+                ("YES", &market.yes_token_id, yes_price)
+            } else if no_price >= high_threshold {
+                ("NO", &market.no_token_id, no_price)
+            } else {
+                debug!(
+                    "Skipping {} - YES {} and NO {} both below threshold {}",
+                    market.name, yes_price, no_price, high_threshold
+                );
+                continue;
+            }
         };
 
-        // Sanity check on market price
-        if market_price < dec!(0.01) {
-            warn!("Skipping {} - market price {} too low", market.name, market_price);
-            continue;
+        // Sanity check on order price (only for non-contrarian)
+        if !args.contrarian {
+            if order_price < dec!(0.01) {
+                warn!("Skipping {} - market price {} too low", market.name, order_price);
+                continue;
+            }
+            if order_price > dec!(0.99) {
+                warn!("Skipping {} - market price {} too high", market.name, order_price);
+                continue;
+            }
         }
 
-        if market_price > dec!(0.99) {
-            warn!("Skipping {} - market price {} too high", market.name, market_price);
-            continue;
-        }
-
-        // Calculate shares based on market price (expected fill price)
-        let shares = position_size / market_price;
+        // Calculate shares based on order price
+        let shares = position_size / order_price;
 
         if shares > MAX_SHARES {
             warn!(
@@ -283,31 +358,47 @@ async fn run_cycle(
             continue;
         }
 
+        let mode_label = if args.contrarian { "CONTRARIAN" } else { "SIGNAL" };
         info!(
-            "[SIGNAL] {} {} - market @ ${}, order @ ${} ({} shares) - expires {:?}",
-            side, market.name, market_price, limit_price, shares, market.end_time
+            "[{}] {} {} @ ${} ({} shares) - YES={}, NO={} - expires {:?}",
+            mode_label, side, market.name, order_price, shares, yes_price, no_price, market.end_time
         );
 
         if args.dry_run {
-            info!("[DRY RUN] Would place order: {} {} shares @ ${} (market: ${})", side, shares, limit_price, market_price);
+            info!("[DRY RUN] Would place order: {} {} shares @ ${}", side, shares, order_price);
             traded_markets.insert(market.id);
             continue;
         }
 
-        // Execute trade at limit_price (not market price) to ensure fill
+        // Execute trade
         match execute_trade(
             cached_auth,
             token_id,
             shares,
-            limit_price,
+            order_price,
             side,
             &market.name,
         )
         .await
         {
-            Ok(_) => {
-                info!("[SUCCESS] Placed {} order for {} @ ${}", side, market.name, limit_price);
+            Ok(order_id) => {
+                info!("[SUCCESS] Placed {} order {} for {} @ ${}", side, order_id, market.name, order_price);
                 traded_markets.insert(market.id);
+
+                // Schedule cancellation if configured
+                if args.cancel_after_secs > 0 {
+                    let cancel_at = Utc::now()
+                        + chrono::Duration::seconds(args.cancel_after_secs as i64);
+                    pending_cancels.push(PendingCancel {
+                        order_id,
+                        market_name: market.name.clone(),
+                        cancel_at,
+                    });
+                    debug!(
+                        "[CANCEL] Scheduled cancellation for {} at {:?}",
+                        market.name, cancel_at
+                    );
+                }
             }
             Err(e) => {
                 error!("[ERROR] Failed to place order for {}: {:#}", market.name, e);
@@ -330,7 +421,70 @@ async fn run_cycle(
     debug!("Cycle completed in {:?}", elapsed);
 }
 
-/// Execute a trade on Polymarket
+/// Process pending order cancellations.
+/// Cancels orders that have reached their cancel_at time.
+async fn process_pending_cancels(
+    cached_auth: &mut Option<CachedAuth>,
+    pending_cancels: &mut Vec<PendingCancel>,
+) {
+    let now = Utc::now();
+
+    // Partition into ready-to-cancel and not-yet-ready
+    let (ready, not_ready): (Vec<_>, Vec<_>) = pending_cancels
+        .drain(..)
+        .partition(|pc| pc.cancel_at <= now);
+
+    // Restore not-ready cancellations
+    *pending_cancels = not_ready;
+
+    if ready.is_empty() {
+        return;
+    }
+
+    info!("[CANCEL] Processing {} pending cancellations", ready.len());
+
+    // Ensure we're authenticated for cancellations
+    let auth = match ensure_authenticated(cached_auth).await {
+        Ok(a) => a,
+        Err(e) => {
+            error!("[CANCEL] Failed to authenticate for cancellations: {:#}", e);
+            // Re-add ready cancellations to try again later
+            pending_cancels.extend(ready);
+            return;
+        }
+    };
+
+    for pc in ready {
+        match timeout(
+            Duration::from_secs(CANCEL_TIMEOUT_SECS),
+            auth.client.cancel_order(&pc.order_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!(
+                    "[CANCEL] Successfully cancelled order {} for {}",
+                    pc.order_id, pc.market_name
+                );
+            }
+            Ok(Err(e)) => {
+                // Order may have already been filled or cancelled
+                debug!(
+                    "[CANCEL] Failed to cancel order {} for {}: {:#}",
+                    pc.order_id, pc.market_name, e
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "[CANCEL] Timeout cancelling order {} for {}",
+                    pc.order_id, pc.market_name
+                );
+            }
+        }
+    }
+}
+
+/// Execute a trade on Polymarket. Returns the order ID on success.
 async fn execute_trade(
     cached_auth: &mut Option<CachedAuth>,
     token_id: &str,
@@ -338,7 +492,7 @@ async fn execute_trade(
     price: Decimal,
     side: &str,
     market_name: &str,
-) -> Result<()> {
+) -> Result<String> {
     // Ensure authenticated
     let auth = ensure_authenticated(cached_auth).await?;
 
@@ -393,7 +547,7 @@ async fn execute_trade(
                 "[TRADE] Order placed successfully: {} (order_id: {})",
                 market_name, order.order_id
             );
-            Ok(())
+            Ok(order.order_id.clone())
         } else if let Some(ref error) = order.error_msg {
             Err(anyhow::anyhow!("Order rejected: {}", error))
         } else {

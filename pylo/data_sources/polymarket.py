@@ -21,6 +21,35 @@ CLOB_API_URL = "https://clob.polymarket.com"
 # Rate limits (requests per second)
 POLYMARKET_RATE_LIMIT = 10  # Conservative limit
 
+# Known crypto series IDs for Up/Down markets (matching Rust gamma.rs)
+CRYPTO_SERIES_15M = {
+    "BTC": "10192",  # BTC Up or Down 15m
+    "ETH": "10191",  # ETH Up or Down 15m
+    "SOL": "10423",  # SOL Up or Down 15m
+    "XRP": "10422",  # XRP Up or Down 15m
+}
+
+CRYPTO_SERIES_1H = {
+    "BTC": "10114",  # BTC Up or Down 1h
+    "ETH": "10117",  # ETH Up or Down 1h
+    "SOL": "10122",  # SOL Up or Down 1h
+    "XRP": "10123",  # XRP Up or Down 1h
+}
+
+CRYPTO_SERIES_4H = {
+    "BTC": "10194",  # BTC Up or Down 4h
+    "ETH": "10195",  # ETH Up or Down 4h
+    "SOL": "10425",  # SOL Up or Down 4h
+    "XRP": "10426",  # XRP Up or Down 4h
+}
+
+CRYPTO_SERIES_DAILY = {
+    "BTC": "10115",  # BTC Up or Down Daily
+    "ETH": "10118",  # ETH Up or Down Daily
+    "SOL": "10121",  # SOL Up or Down Daily
+    "XRP": "10124",  # XRP Up or Down Daily
+}
+
 
 class PolymarketClient(BaseDataSource):
     """Client for Polymarket's Gamma and CLOB APIs."""
@@ -337,3 +366,372 @@ class PolymarketClient(BaseDataSource):
         except httpx.HTTPError as e:
             self.logger.error(f"Search failed: {e}")
             return []
+
+    async def get_closed_markets(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        asset_filter: list[str] | None = None,
+        timeframe_filter: str | None = None,
+    ) -> list[Market]:
+        """
+        Fetch closed (resolved) markets from Gamma API.
+
+        Args:
+            limit: Maximum number of markets to fetch
+            offset: Pagination offset
+            asset_filter: Optional list of assets to filter (e.g., ['BTC', 'ETH'])
+            timeframe_filter: Optional timeframe filter (e.g., '15m', '1h')
+
+        Returns:
+            List of resolved Market objects
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "closed": "true",
+        }
+
+        try:
+            async with self._throttler:
+                response = await self._client.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            markets = []
+            for item in data:
+                market = self._parse_market(item)
+                if market and market.resolved:
+                    # Apply filters
+                    if asset_filter:
+                        market_slug = market.raw.get("slug", "").lower() if market.raw else ""
+                        market_name = market.name.lower()
+                        has_asset = any(
+                            asset.lower() in market_slug or asset.lower() in market_name
+                            for asset in asset_filter
+                        )
+                        if not has_asset:
+                            continue
+
+                    if timeframe_filter:
+                        market_name = market.name.lower()
+                        if timeframe_filter.lower() not in market_name:
+                            # Check for "15 minute" vs "15m" variations
+                            tf_map = {"15m": ["15 minute", "15-minute", "15min"]}
+                            variations = tf_map.get(timeframe_filter.lower(), [])
+                            if not any(v in market_name for v in variations):
+                                continue
+
+                    markets.append(market)
+
+            self.logger.info(f"Fetched {len(markets)} closed markets from Polymarket")
+            return markets
+
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to fetch closed markets: {e}")
+            return []
+
+    async def get_price_history(
+        self,
+        token_id: str,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        fidelity: int = 60,
+    ) -> list[dict]:
+        """
+        Fetch historical price data from CLOB API.
+
+        Args:
+            token_id: The token ID (YES or NO token)
+            start_ts: Start timestamp (Unix seconds)
+            end_ts: End timestamp (Unix seconds)
+            fidelity: Data granularity in seconds (default 60 = 1 minute)
+
+        Returns:
+            List of price history points: [{"t": timestamp, "p": price}, ...]
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        params: dict = {"token_id": token_id, "fidelity": fidelity}
+        if start_ts:
+            params["startTs"] = start_ts
+        if end_ts:
+            params["endTs"] = end_ts
+
+        try:
+            async with self._throttler:
+                response = await self._client.get(
+                    f"{CLOB_API_URL}/prices-history",
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            # API returns {"history": [{"t": ts, "p": price}, ...]}
+            return data.get("history", [])
+
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to fetch price history for {token_id}: {e}")
+            return []
+
+    async def get_all_closed_crypto_markets(
+        self,
+        days: int = 30,
+        assets: list[str] | None = None,
+        timeframe: str = "15m",
+    ) -> list[Market]:
+        """
+        Fetch all closed crypto up/down markets for backtesting.
+
+        Paginates through all available closed markets matching the filters.
+
+        Args:
+            days: Number of days to look back
+            assets: List of crypto assets (default: ['BTC', 'ETH', 'SOL', 'XRP'])
+            timeframe: Market timeframe (default: '15m')
+
+        Returns:
+            List of resolved crypto markets
+        """
+        from datetime import UTC, timedelta
+
+        if assets is None:
+            assets = ["BTC", "ETH", "SOL", "XRP"]
+
+        cutoff_date = datetime.now(UTC) - timedelta(days=days)
+        all_markets: list[Market] = []
+        offset = 0
+        batch_size = 100
+
+        while True:
+            markets = await self.get_closed_markets(
+                limit=batch_size,
+                offset=offset,
+                asset_filter=assets,
+                timeframe_filter=timeframe,
+            )
+
+            if not markets:
+                break
+
+            # Filter by date and add to results
+            for market in markets:
+                if market.end_date and market.end_date >= cutoff_date:
+                    all_markets.append(market)
+
+            # Check if we should continue pagination
+            if len(markets) < batch_size:
+                break
+
+            offset += batch_size
+
+            # Safety limit
+            if offset > 10000:
+                self.logger.warning("Reached safety limit of 10000 markets")
+                break
+
+        self.logger.info(
+            f"Found {len(all_markets)} closed {timeframe} crypto markets in last {days} days"
+        )
+        return all_markets
+
+    async def get_closed_events_by_series(
+        self,
+        series_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """
+        Fetch closed events for a specific series from the Gamma API.
+
+        Args:
+            series_id: The series ID (e.g., "10192" for BTC 15m)
+            limit: Maximum number of events to fetch
+            offset: Pagination offset
+
+        Returns:
+            List of raw event dicts with nested markets
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        params = {
+            "series_id": series_id,
+            "closed": "true",
+            "limit": limit,
+            "offset": offset,
+        }
+
+        try:
+            async with self._throttler:
+                response = await self._client.get(
+                    f"{GAMMA_API_URL}/events",
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to fetch events for series {series_id}: {e}")
+            return []
+
+    async def get_all_closed_markets_by_series(
+        self,
+        days: int = 30,
+        assets: list[str] | None = None,
+        timeframe: str = "15m",
+    ) -> list[Market]:
+        """
+        Fetch all closed crypto Up/Down markets using series_id queries.
+
+        This is the preferred method for fetching historical data because
+        it uses series_id to target specific market types, avoiding the
+        issue of the API returning unrelated old markets.
+
+        Note: Events are returned oldest first, so we start from a high offset
+        and work backwards to get recent events first.
+
+        Args:
+            days: Number of days to look back
+            assets: List of crypto assets (default: ['BTC', 'ETH', 'SOL', 'XRP'])
+            timeframe: Market timeframe ('15m', '1h', '4h', 'daily')
+
+        Returns:
+            List of resolved crypto markets
+        """
+        from datetime import UTC, timedelta
+        import json
+
+        if assets is None:
+            assets = ["BTC", "ETH", "SOL", "XRP"]
+
+        # Select the right series mapping based on timeframe
+        series_map = {
+            "15m": CRYPTO_SERIES_15M,
+            "1h": CRYPTO_SERIES_1H,
+            "4h": CRYPTO_SERIES_4H,
+            "daily": CRYPTO_SERIES_DAILY,
+        }
+
+        series_ids = series_map.get(timeframe, CRYPTO_SERIES_15M)
+        cutoff_date = datetime.now(UTC) - timedelta(days=days)
+        all_markets: list[Market] = []
+
+        for asset in assets:
+            series_id = series_ids.get(asset)
+            if not series_id:
+                self.logger.warning(f"No series ID for {asset} {timeframe}")
+                continue
+
+            self.logger.info(f"Fetching closed {asset} {timeframe} markets (series={series_id})...")
+
+            # Start from a high offset to get recent events (events are sorted oldest first)
+            # For 15m markets, there are ~96 events per day, so 30 days = ~2880 events
+            # BTC/ETH have more history (start ~11000), SOL/XRP are newer (start ~7000)
+            if timeframe == "15m":
+                start_offset = 11000 if asset in ("BTC", "ETH") else 7000
+            else:
+                start_offset = 1000
+            offset = start_offset
+            batch_size = 100
+            asset_count = 0
+            empty_count = 0
+
+            while True:
+                events = await self.get_closed_events_by_series(
+                    series_id=series_id,
+                    limit=batch_size,
+                    offset=offset,
+                )
+
+                if not events:
+                    # Try going backwards if we started too high
+                    if offset >= start_offset and start_offset > 0:
+                        start_offset = max(0, start_offset - 1000)
+                        offset = start_offset
+                        self.logger.debug(f"No events at offset {offset + batch_size}, trying {offset}")
+                        empty_count += 1
+                        if empty_count > 10:
+                            break
+                        continue
+                    break
+
+                reached_cutoff = False
+                for event in events:
+                    # Parse end_date from event
+                    end_date_str = event.get("endDate")
+                    event_end_date = None
+                    if end_date_str:
+                        try:
+                            event_end_date = datetime.fromisoformat(
+                                end_date_str.replace("Z", "+00:00")
+                            )
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Skip if too old
+                    if event_end_date and event_end_date < cutoff_date:
+                        reached_cutoff = True
+                        continue
+
+                    # Process nested markets in the event
+                    for market_data in event.get("markets", []):
+                        # Parse resolution from outcomePrices if outcome is not set
+                        # Format: ["1", "0"] means first outcome won, ["0", "1"] means second won
+                        outcome = market_data.get("outcome")
+                        if not outcome:
+                            outcome_prices_str = market_data.get("outcomePrices", "[]")
+                            outcomes_str = market_data.get("outcomes", "[]")
+                            try:
+                                if isinstance(outcome_prices_str, str):
+                                    outcome_prices = json.loads(outcome_prices_str)
+                                else:
+                                    outcome_prices = outcome_prices_str
+                                if isinstance(outcomes_str, str):
+                                    outcomes = json.loads(outcomes_str)
+                                else:
+                                    outcomes = outcomes_str
+
+                                # Find which outcome has price "1" (the winner)
+                                for i, price in enumerate(outcome_prices):
+                                    if price == "1" or price == 1:
+                                        if i < len(outcomes):
+                                            outcome = outcomes[i]
+                                            market_data["outcome"] = outcome
+                                        break
+                            except (json.JSONDecodeError, TypeError, IndexError):
+                                pass
+
+                        market = self._parse_market(market_data)
+                        if market and market.resolved:
+                            all_markets.append(market)
+                            asset_count += 1
+
+                # If we've gone past the cutoff date, stop
+                if reached_cutoff:
+                    break
+
+                # Check if we should continue pagination
+                if len(events) < batch_size:
+                    break
+
+                offset += batch_size
+
+                # Safety limit - allow up to 10000 events per asset
+                if offset > start_offset + 10000:
+                    self.logger.warning(f"Reached safety limit for {asset} {timeframe}")
+                    break
+
+            self.logger.info(f"Found {asset_count} closed {asset} {timeframe} markets")
+
+        self.logger.info(
+            f"Total: {len(all_markets)} closed {timeframe} crypto markets in last {days} days"
+        )
+        return all_markets
