@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            m.id as market_id,\n            r.winning_side,\n            r.resolved_at\n        FROM markets m\n        JOIN market_resolutions r ON r.condition_id = m.condition_id\n        WHERE m.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "market_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "winning_side",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "resolved_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "68976e2f5f013ad7b37cbe10124e4c0e6e0619119557e67537692b931b301c1d"
+}
