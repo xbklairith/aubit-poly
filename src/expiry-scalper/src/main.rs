@@ -27,6 +27,132 @@ use common::{
     Database,
 };
 
+/// Simulated position for dry-run portfolio tracking
+#[derive(Debug, Clone)]
+struct SimulatedPosition {
+    market_id: Uuid,
+    market_name: String,
+    side: String, // "YES" or "NO"
+    shares: Decimal,
+    entry_price: Decimal,
+    cost: Decimal,
+    end_time: DateTime<Utc>,
+    entered_at: DateTime<Utc>,
+}
+
+/// Dry-run portfolio tracker
+#[derive(Debug, Default)]
+struct DryRunPortfolio {
+    positions: Vec<SimulatedPosition>,
+    total_invested: Decimal,
+    total_pnl: Decimal,
+    realized_wins: u32,
+    realized_losses: u32,
+    pending_count: u32,
+}
+
+impl DryRunPortfolio {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn add_position(&mut self, position: SimulatedPosition) {
+        self.total_invested += position.cost;
+        self.pending_count += 1;
+        self.positions.push(position);
+    }
+
+    /// Resolve expired positions and calculate P&L
+    /// Returns true if any positions were resolved
+    fn resolve_expired(&mut self) -> bool {
+        let now = Utc::now();
+        let mut resolved_any = false;
+
+        // Find positions that have expired (with 30s buffer for settlement)
+        let expired_cutoff = now - chrono::Duration::seconds(30);
+
+        let (expired, active): (Vec<_>, Vec<_>) = self
+            .positions
+            .drain(..)
+            .partition(|p| p.end_time < expired_cutoff);
+
+        self.positions = active;
+
+        for pos in expired {
+            resolved_any = true;
+            self.pending_count = self.pending_count.saturating_sub(1);
+
+            // For contrarian strategy at limit_price 0.99:
+            // - We bet against the dominant side
+            // - If we bought NO at 0.99 and market resolves NO, we get $1 per share
+            // - If we bought NO at 0.99 and market resolves YES, we lose our stake
+            //
+            // Since we don't have actual resolution data in dry-run,
+            // we simulate based on entry price (contrarian bets at 0.99 expect to win)
+            // For now, assume 50% win rate for conservative estimate
+            let win = self.realized_wins + self.realized_losses;
+            let should_win = win % 2 == 0; // Alternate wins/losses for simulation
+
+            if should_win {
+                // Win: get $1 per share, profit = shares - cost
+                let payout = pos.shares;
+                let profit = payout - pos.cost;
+                self.total_pnl += profit;
+                self.realized_wins += 1;
+                info!(
+                    "[PORTFOLIO] ✅ RESOLVED WIN: {} {} @ ${:.2} -> Profit: ${:.2}",
+                    pos.side, pos.market_name, pos.entry_price, profit
+                );
+            } else {
+                // Loss: lose entire stake
+                let loss = pos.cost;
+                self.total_pnl -= loss;
+                self.realized_losses += 1;
+                info!(
+                    "[PORTFOLIO] ❌ RESOLVED LOSS: {} {} @ ${:.2} -> Loss: -${:.2}",
+                    pos.side, pos.market_name, pos.entry_price, loss
+                );
+            }
+        }
+
+        resolved_any
+    }
+
+    fn print_summary(&self) {
+        let total_trades = self.realized_wins + self.realized_losses;
+        let win_rate = if total_trades > 0 {
+            (self.realized_wins as f64 / total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        info!("╔════════════════════════════════════════════════════════════╗");
+        info!("║              DRY-RUN PORTFOLIO SUMMARY                     ║");
+        info!("╠════════════════════════════════════════════════════════════╣");
+        info!(
+            "║  Total Invested:    ${:<10.2}                           ║",
+            self.total_invested
+        );
+        info!(
+            "║  Realized P&L:      ${:<10.2}                           ║",
+            self.total_pnl
+        );
+        info!(
+            "║  Pending Positions: {:<10}                             ║",
+            self.pending_count
+        );
+        info!(
+            "║  Wins / Losses:     {} / {}                                  ║",
+            self.realized_wins, self.realized_losses
+        );
+        info!(
+            "║  Win Rate:          {:<6.1}%                               ║",
+            win_rate
+        );
+        info!("╚════════════════════════════════════════════════════════════╝");
+    }
+}
+
 const CLOB_HOST: &str = "https://clob.polymarket.com";
 const ORDER_TIMEOUT_SECS: u64 = 30;
 const CANCEL_TIMEOUT_SECS: u64 = 10;
@@ -176,6 +302,10 @@ async fn main() -> Result<()> {
     // Pending order cancellations
     let mut pending_cancels: Vec<PendingCancel> = Vec::new();
 
+    // Dry-run portfolio tracker
+    let mut portfolio = DryRunPortfolio::new();
+    let mut cycle_count: u32 = 0;
+
     // Parse assets from CLI
     let assets: Vec<String> = args.assets
         .split(',')
@@ -206,11 +336,25 @@ async fn main() -> Result<()> {
                 &mut traded_markets,
                 &mut cached_auth,
                 &mut pending_cancels,
+                &mut portfolio,
             ) => {}
+        }
+
+        cycle_count += 1;
+
+        // Print portfolio summary every 12 cycles (~1 min at 5s interval)
+        if args.dry_run && cycle_count % 12 == 0 {
+            portfolio.print_summary();
         }
 
         // Sleep until next cycle
         tokio::time::sleep(Duration::from_secs(args.interval_secs)).await;
+    }
+
+    // Final portfolio summary on shutdown
+    if args.dry_run {
+        info!("=== FINAL PORTFOLIO STATUS ===");
+        portfolio.print_summary();
     }
 
     info!("Shutdown complete");
@@ -228,8 +372,14 @@ async fn run_cycle(
     traded_markets: &mut HashSet<Uuid>,
     cached_auth: &mut Option<CachedAuth>,
     pending_cancels: &mut Vec<PendingCancel>,
+    portfolio: &mut DryRunPortfolio,
 ) {
     let cycle_start = std::time::Instant::now();
+
+    // Resolve expired positions in dry-run mode
+    if args.dry_run {
+        portfolio.resolve_expired();
+    }
 
     // Process pending cancellations first
     if !pending_cancels.is_empty() {
@@ -365,7 +515,24 @@ async fn run_cycle(
         );
 
         if args.dry_run {
-            info!("[DRY RUN] Would place order: {} {} shares @ ${}", side, shares, order_price);
+            let cost = shares * order_price;
+            info!(
+                "[DRY RUN] Would place order: {} {} shares @ ${} (cost: ${:.2})",
+                side, shares, order_price, cost
+            );
+
+            // Add to simulated portfolio
+            portfolio.add_position(SimulatedPosition {
+                market_id: market.id,
+                market_name: market.name.clone(),
+                side: side.to_string(),
+                shares,
+                entry_price: order_price,
+                cost,
+                end_time: market.end_time,
+                entered_at: Utc::now(),
+            });
+
             traded_markets.insert(market.id);
             continue;
         }

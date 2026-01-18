@@ -92,11 +92,12 @@ services:
     command: >
       --interval-secs 5
       --expiry-minutes 1
-      --position-size 1
+      --position-size 2
       --limit-price 0.99
       --high-threshold 0.70
       --contrarian
       --only-15m-updown
+      --dry-run
     restart: unless-stopped
     networks:
       - aubit-net
