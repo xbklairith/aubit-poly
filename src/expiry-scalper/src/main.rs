@@ -32,12 +32,12 @@ use common::{
 struct SimulatedPosition {
     market_id: Uuid,
     market_name: String,
-    side: String, // "YES" or "NO"
+    side: String,         // "YES" or "NO" - the side we bet on
     shares: Decimal,
-    entry_price: Decimal,
+    entry_price: Decimal, // Limit order price (e.g., 0.99)
+    market_price: Decimal, // Actual orderbook price of dominant side
     cost: Decimal,
     end_time: DateTime<Utc>,
-    entered_at: DateTime<Utc>,
 }
 
 /// Dry-run portfolio tracker
@@ -103,6 +103,16 @@ impl DryRunPortfolio {
 
         for pos in expired {
             if let Some(winning_side) = resolution_map.get(&pos.market_id) {
+                // Validate winning_side is YES or NO
+                if winning_side != "YES" && winning_side != "NO" {
+                    warn!(
+                        "[PORTFOLIO] Invalid winning_side '{}' for {}, skipping",
+                        winning_side, pos.market_name
+                    );
+                    self.positions.push(pos);
+                    continue;
+                }
+
                 resolved_any = true;
                 self.pending_count = self.pending_count.saturating_sub(1);
 
@@ -116,8 +126,8 @@ impl DryRunPortfolio {
                     self.total_pnl += profit;
                     self.realized_wins += 1;
                     info!(
-                        "[PORTFOLIO] ✅ WIN: {} {} @ ${:.2} -> Profit: ${:.2} (resolved: {})",
-                        pos.side, pos.market_name, pos.entry_price, profit, winning_side
+                        "[PORTFOLIO] ✅ WIN: {} {} (mkt: ${:.2}) -> +${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pos.market_price, profit, winning_side
                     );
                 } else {
                     // Loss: lose entire stake
@@ -125,8 +135,8 @@ impl DryRunPortfolio {
                     self.total_pnl -= loss;
                     self.realized_losses += 1;
                     info!(
-                        "[PORTFOLIO] ❌ LOSS: {} {} @ ${:.2} -> Loss: -${:.2} (resolved: {})",
-                        pos.side, pos.market_name, pos.entry_price, loss, winning_side
+                        "[PORTFOLIO] ❌ LOSS: {} {} (mkt: ${:.2}) -> -${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pos.market_price, loss, winning_side
                     );
                 }
             } else {
@@ -479,14 +489,15 @@ async fn run_cycle(
         };
 
         // Determine which side to trade based on threshold and mode
-        let (side, token_id, order_price) = if args.contrarian {
+        // Returns: (side_to_bet, token_id, order_price, bet_side_market_price)
+        let (side, token_id, order_price, market_price) = if args.contrarian {
             // Contrarian mode: bet AGAINST the skewed side at low price
             if yes_price >= high_threshold {
-                // YES is skewed high, bet on NO at limit_price
-                ("NO", &market.no_token_id, limit_price)
+                // YES is skewed high (0.80), NO is cheap (~0.20), bet on NO
+                ("NO", &market.no_token_id, limit_price, no_price)
             } else if no_price >= high_threshold {
-                // NO is skewed high, bet on YES at limit_price
-                ("YES", &market.yes_token_id, limit_price)
+                // NO is skewed high (0.80), YES is cheap (~0.20), bet on YES
+                ("YES", &market.yes_token_id, limit_price, yes_price)
             } else {
                 debug!(
                     "Skipping {} - YES {} and NO {} both below threshold {} (contrarian)",
@@ -497,9 +508,9 @@ async fn run_cycle(
         } else {
             // Normal mode: bet WITH the skewed side
             if yes_price >= high_threshold {
-                ("YES", &market.yes_token_id, yes_price)
+                ("YES", &market.yes_token_id, yes_price, yes_price)
             } else if no_price >= high_threshold {
-                ("NO", &market.no_token_id, no_price)
+                ("NO", &market.no_token_id, no_price, no_price)
             } else {
                 debug!(
                     "Skipping {} - YES {} and NO {} both below threshold {}",
@@ -521,8 +532,10 @@ async fn run_cycle(
             }
         }
 
-        // Calculate shares based on order price
-        let shares = position_size / order_price;
+        // Calculate shares based on actual market price (expected fill price)
+        // Limit order at 0.99 guarantees fill at market price
+        // Round to 2dp to match real execution
+        let shares = (position_size / market_price).round_dp(2);
 
         if shares > MAX_SHARES {
             warn!(
@@ -534,15 +547,15 @@ async fn run_cycle(
 
         let mode_label = if args.contrarian { "CONTRARIAN" } else { "SIGNAL" };
         info!(
-            "[{}] {} {} @ ${} ({} shares) - YES={}, NO={} - expires {:?}",
-            mode_label, side, market.name, order_price, shares, yes_price, no_price, market.end_time
+            "[{}] {} {} @ ${:.2} ({:.2} shares, ${:.2}) - YES={}, NO={} - expires {:?}",
+            mode_label, side, market.name, market_price, shares, position_size, yes_price, no_price, market.end_time
         );
 
         if args.dry_run {
-            let cost = shares * order_price;
+            let cost = shares * market_price; // Actual cost at market price
             info!(
-                "[DRY RUN] Would place order: {} {} shares @ ${} (cost: ${:.2})",
-                side, shares, order_price, cost
+                "[DRY RUN] {} {:.2} shares @ ${} (limit: ${}) -> Win: ${:.2}",
+                side, shares, market_price, order_price, shares - cost
             );
 
             // Add to simulated portfolio
@@ -552,9 +565,9 @@ async fn run_cycle(
                 side: side.to_string(),
                 shares,
                 entry_price: order_price,
+                market_price,
                 cost,
                 end_time: market.end_time,
-                entered_at: Utc::now(),
             });
 
             traded_markets.insert(market.id);
