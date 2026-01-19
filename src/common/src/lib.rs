@@ -5,17 +5,28 @@
 //! - Database connection pooling
 //! - Gamma API client
 //! - Shared data models
+//! - Binance WebSocket client
+//! - Trading executor utilities
 
+pub mod binance_ws;
 pub mod clob;
 pub mod config;
 pub mod db;
+pub mod executor;
 pub mod gamma;
 pub mod models;
 pub mod repository;
 
+pub use binance_ws::{
+    BinanceKline, BinanceWsClient, BinanceWsStream, KlineBuffer, MomentumDirection,
+};
 pub use clob::{BookMessage, ClobClient, ClobMessage, PriceChange, PriceChangeMessage, PriceLevel};
 pub use config::Config;
 pub use db::Database;
+pub use executor::{
+    cancel_order, ensure_authenticated, execute_trade, CachedAuth, DryRunPortfolio,
+    SimulatedPosition, MAX_SHARES,
+};
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{
     calculate_effective_fill_price, calculate_fill_price_with_slippage, deactivate_expired_markets,

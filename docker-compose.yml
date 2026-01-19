@@ -102,6 +102,31 @@ services:
     networks:
       - aubit-net
 
+  momentum-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: momentum-trader
+    entrypoint: ["momentum-trader"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: >
+      --min-momentum 0.002
+      --lookback-minutes 5
+      --max-entry-price 0.99
+      --position-size 5
+      --max-expiry-minutes 10
+      --min-expiry-minutes 1
+      --cooldown-secs 900
+      --assets BTC,ETH,SOL,XRP
+      --dry-run
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
   poly-check:
     build:
       context: .

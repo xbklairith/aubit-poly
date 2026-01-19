@@ -7,6 +7,7 @@ members = [
     "src/trade-executor",
     "src/poly-check",
     "src/expiry-scalper",
+    "src/momentum-trader",
 ]
 
 [workspace.package]
@@ -56,3 +57,7 @@ futures-util = "0.3"
 # Testing
 mockall = "0.13"
 async-trait = "0.1"
+
+# Polymarket SDK
+polymarket-client-sdk = "0.1"
+alloy = { version = "1.3", features = ["signers", "signer-local"] }
