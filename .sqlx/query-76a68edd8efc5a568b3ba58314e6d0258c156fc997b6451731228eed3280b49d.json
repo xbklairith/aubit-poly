@@ -1,0 +1,120 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.yes_asks,\n            o.no_asks,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid,\n                yes_asks, no_asks, captured_at\n            FROM orderbook_snapshots\n            WHERE yes_updated_at > $1\n              AND no_updated_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.asset = ANY($2)\n          AND m.timeframe = '15m'\n          AND m.market_type = 'up_down'\n          AND m.end_time > NOW()\n          AND m.end_time <= $3\n        ORDER BY m.end_time ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "condition_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "market_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "asset",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "timeframe",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "yes_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "no_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "end_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "yes_best_ask",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 11,
+        "name": "yes_best_bid",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 12,
+        "name": "no_best_ask",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 13,
+        "name": "no_best_bid",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 14,
+        "name": "yes_asks",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 15,
+        "name": "no_asks",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
+        "name": "captured_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "TextArray",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "76a68edd8efc5a568b3ba58314e6d0258c156fc997b6451731228eed3280b49d"
+}
