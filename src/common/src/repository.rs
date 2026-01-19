@@ -29,6 +29,133 @@ pub struct MarketWithPrices {
     pub captured_at: DateTime<Utc>,
 }
 
+/// Market with full orderbook depth for realistic fill price calculation.
+#[derive(Debug, Clone)]
+pub struct MarketWithOrderbook {
+    pub id: Uuid,
+    pub condition_id: String,
+    pub market_type: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub name: String,
+    pub end_time: DateTime<Utc>,
+    pub is_active: bool,
+    // Orderbook prices
+    pub yes_best_ask: Option<Decimal>,
+    pub yes_best_bid: Option<Decimal>,
+    pub no_best_ask: Option<Decimal>,
+    pub no_best_bid: Option<Decimal>,
+    // Full orderbook depth (JSON arrays of {price, size})
+    pub yes_asks: Option<serde_json::Value>,
+    pub no_asks: Option<serde_json::Value>,
+    pub captured_at: DateTime<Utc>,
+}
+
+/// A price level in the orderbook.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OrderbookLevel {
+    pub price: Decimal,
+    pub size: Decimal,
+}
+
+/// Result of fill price calculation.
+#[derive(Debug, Clone)]
+pub struct FillEstimate {
+    /// Weighted average fill price across all levels
+    pub effective_price: Decimal,
+    /// Total shares that can be filled at this price
+    pub filled_shares: Decimal,
+    /// Whether the full order can be filled
+    pub fully_filled: bool,
+    /// Available depth at best price only
+    pub best_price_depth: Decimal,
+}
+
+/// Calculate effective fill price based on orderbook depth.
+/// Returns weighted average price for filling `shares` from the orderbook.
+/// Note: Sorts orderbook levels by price ascending (best price first).
+pub fn calculate_effective_fill_price(
+    orderbook_json: Option<&serde_json::Value>,
+    shares: Decimal,
+) -> Option<FillEstimate> {
+    let orderbook = orderbook_json?;
+
+    // Parse orderbook levels
+    let mut levels: Vec<OrderbookLevel> = serde_json::from_value(orderbook.clone()).ok()?;
+
+    if levels.is_empty() {
+        return None;
+    }
+
+    // Sort by price ascending (best/lowest price first for asks)
+    levels.sort_by(|a, b| a.price.cmp(&b.price));
+
+    let best_price_depth = levels.first().map(|l| l.size).unwrap_or_default();
+
+    let mut remaining = shares;
+    let mut total_cost = Decimal::ZERO;
+    let mut total_filled = Decimal::ZERO;
+
+    for level in &levels {
+        if remaining <= Decimal::ZERO {
+            break;
+        }
+
+        // Skip zero-size levels
+        if level.size <= Decimal::ZERO {
+            continue;
+        }
+
+        let fill_at_level = remaining.min(level.size);
+        total_cost += fill_at_level * level.price;
+        total_filled += fill_at_level;
+        remaining -= fill_at_level;
+    }
+
+    if total_filled == Decimal::ZERO {
+        return None;
+    }
+
+    let effective_price = total_cost / total_filled;
+
+    Some(FillEstimate {
+        effective_price,
+        filled_shares: total_filled,
+        fully_filled: remaining <= Decimal::ZERO,
+        best_price_depth,
+    })
+}
+
+/// Calculate fill price with slippage fallback.
+/// Uses orderbook depth when available, otherwise applies slippage percentage.
+/// Note: When using slippage fallback, `fully_filled` is false (unknown) and
+/// `best_price_depth` is zero (unknown). Callers should handle this appropriately.
+pub fn calculate_fill_price_with_slippage(
+    orderbook_json: Option<&serde_json::Value>,
+    best_ask: Decimal,
+    shares: Decimal,
+    slippage_pct: Decimal,
+) -> FillEstimate {
+    // Try orderbook-based calculation first
+    if let Some(estimate) = calculate_effective_fill_price(orderbook_json, shares) {
+        return estimate;
+    }
+
+    // Fallback: apply slippage to best ask
+    // We don't know actual depth, so be conservative with flags
+    let slippage_multiplier = Decimal::ONE + (slippage_pct / Decimal::from(100));
+    let effective_price = best_ask * slippage_multiplier;
+
+    FillEstimate {
+        effective_price,
+        filled_shares: shares,
+        fully_filled: false,             // Unknown - orderbook depth unavailable
+        best_price_depth: Decimal::ZERO, // Unknown - no orderbook data
+    }
+}
+
 /// Upsert a market into the database.
 /// Updates existing market if condition_id matches, otherwise inserts new.
 pub async fn upsert_market(pool: &PgPool, market: &ParsedMarket) -> Result<Uuid, sqlx::Error> {
@@ -605,6 +732,66 @@ pub async fn get_15m_updown_markets_with_fresh_orderbooks(
         INNER JOIN (
             SELECT DISTINCT ON (market_id)
                 market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
+            FROM orderbook_snapshots
+            WHERE yes_updated_at > $1
+              AND no_updated_at > $1
+            ORDER BY market_id, captured_at DESC
+        ) o ON o.market_id = m.id
+        WHERE m.is_active = true
+          AND m.asset = ANY($2)
+          AND m.timeframe = '15m'
+          AND m.market_type = 'up_down'
+          AND m.end_time > NOW()
+          AND m.end_time <= $3
+        ORDER BY m.end_time ASC
+        "#,
+        snapshot_cutoff,
+        assets,
+        expiry_cutoff,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results)
+}
+
+/// Get 15-minute up/down markets with full orderbook depth.
+/// Includes yes_asks and no_asks for realistic fill price calculation.
+pub async fn get_15m_updown_markets_with_orderbooks(
+    pool: &PgPool,
+    max_age_seconds: i32,
+    assets: &[String],
+    max_expiry_seconds: i64,
+) -> Result<Vec<MarketWithOrderbook>, sqlx::Error> {
+    let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
+    let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+
+    let results = sqlx::query_as!(
+        MarketWithOrderbook,
+        r#"
+        SELECT
+            m.id,
+            m.condition_id,
+            m.market_type,
+            m.asset,
+            m.timeframe,
+            m.yes_token_id,
+            m.no_token_id,
+            m.name,
+            m.end_time,
+            COALESCE(m.is_active, true) as "is_active!",
+            o.yes_best_ask,
+            o.yes_best_bid,
+            o.no_best_ask,
+            o.no_best_bid,
+            o.yes_asks,
+            o.no_asks,
+            o.captured_at as "captured_at!"
+        FROM markets m
+        INNER JOIN (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid,
+                yes_asks, no_asks, captured_at
             FROM orderbook_snapshots
             WHERE yes_updated_at > $1
               AND no_updated_at > $1

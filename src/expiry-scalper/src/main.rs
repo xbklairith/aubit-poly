@@ -23,13 +23,14 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use common::{
-    get_15m_updown_markets_with_fresh_orderbooks, get_market_resolutions_batch,
-    get_markets_with_fresh_orderbooks, upsert_market_resolution, Config, Database, GammaClient,
-    MarketResolutionInsert,
+    calculate_fill_price_with_slippage, get_15m_updown_markets_with_orderbooks,
+    get_market_resolutions_batch, get_markets_with_fresh_orderbooks, upsert_market_resolution,
+    Config, Database, GammaClient, MarketResolutionInsert, MarketWithOrderbook,
 };
 
 /// Simulated position for dry-run portfolio tracking
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields kept for debugging and future use
 struct SimulatedPosition {
     market_id: Uuid,
     condition_id: String,
@@ -41,9 +42,10 @@ struct SimulatedPosition {
     no_token_id: String,
     side: String, // "YES" or "NO" - the side we bet on
     shares: Decimal,
-    entry_price: Decimal,  // Limit order price (e.g., 0.99)
-    market_price: Decimal, // Actual orderbook price of bet side
-    cost: Decimal,
+    entry_price: Decimal,          // Limit order price (e.g., 0.99)
+    best_ask_price: Decimal,       // Best ask price at time of signal
+    effective_fill_price: Decimal, // Weighted average fill price from orderbook depth
+    cost: Decimal,                 // Actual cost = shares * effective_fill_price
     end_time: DateTime<Utc>,
 }
 
@@ -178,7 +180,7 @@ impl DryRunPortfolio {
                 self.realized_wins += 1;
                 info!(
                     "[PORTFOLIO] ✅ WIN: {} {} (mkt: ${:.2}) -> +${:.2} (resolved: {})",
-                    pos.side, pos.market_name, pos.market_price, profit, winning_side
+                    pos.side, pos.market_name, pos.best_ask_price, profit, winning_side
                 );
             } else {
                 // Loss: lose entire stake
@@ -187,7 +189,7 @@ impl DryRunPortfolio {
                 self.realized_losses += 1;
                 info!(
                     "[PORTFOLIO] ❌ LOSS: {} {} (mkt: ${:.2}) -> -${:.2} (resolved: {})",
-                    pos.side, pos.market_name, pos.market_price, loss, winning_side
+                    pos.side, pos.market_name, pos.best_ask_price, loss, winning_side
                 );
             }
         }
@@ -292,6 +294,15 @@ struct Args {
     /// Auto-cancel unfilled orders after this many seconds (0 = no cancel)
     #[arg(long, default_value = "0")]
     cancel_after_secs: u64,
+
+    /// Slippage percentage for fill price estimation (default 20%)
+    /// Used when orderbook depth is unavailable
+    #[arg(long, default_value = "20")]
+    slippage_pct: f64,
+
+    /// Minimum orderbook depth required at best price (skip if less)
+    #[arg(long, default_value = "0")]
+    min_depth: f64,
 }
 
 /// Cached authentication state
@@ -323,6 +334,12 @@ fn validate_args(args: &Args) -> Result<()> {
     }
     if args.limit_price > 0.99 || args.limit_price < 0.01 {
         bail!("limit_price must be between 0.01 and 0.99");
+    }
+    if args.slippage_pct < 0.0 || args.slippage_pct > 100.0 {
+        bail!("slippage_pct must be between 0 and 100");
+    }
+    if args.min_depth < 0.0 {
+        bail!("min_depth must be non-negative");
     }
     Ok(())
 }
@@ -442,6 +459,262 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Process a single market with orderbook depth for realistic fill price estimation.
+/// Returns true if trade was placed/simulated, false otherwise.
+#[allow(clippy::too_many_arguments)]
+async fn process_market_with_orderbook(
+    market: &MarketWithOrderbook,
+    args: &Args,
+    high_threshold: Decimal,
+    position_size: Decimal,
+    limit_price: Decimal,
+    slippage_pct: Decimal,
+    min_depth: Decimal,
+    traded_markets: &mut HashSet<Uuid>,
+    cached_auth: &mut Option<CachedAuth>,
+    pending_cancels: &mut Vec<PendingCancel>,
+    portfolio: &mut DryRunPortfolio,
+) -> bool {
+    // Skip if already traded
+    if traded_markets.contains(&market.id) {
+        debug!("Skipping {} - already traded", market.name);
+        return false;
+    }
+
+    // Get YES price (ask price to buy YES)
+    let yes_price = match market.yes_best_ask {
+        Some(p) if p > dec!(0) && p <= dec!(1) => p,
+        _ => {
+            debug!(
+                "Skipping {} - invalid YES ask price: {:?}",
+                market.name, market.yes_best_ask
+            );
+            return false;
+        }
+    };
+
+    // Get NO price (ask price to buy NO)
+    let no_price = match market.no_best_ask {
+        Some(p) if p > dec!(0) && p <= dec!(1) => p,
+        _ => {
+            debug!(
+                "Skipping {} - invalid NO ask price: {:?}",
+                market.name, market.no_best_ask
+            );
+            return false;
+        }
+    };
+
+    // Determine which side to trade and get orderbook depth
+    // Returns: (side, token_id, order_price, best_ask, orderbook_depth)
+    let (side, token_id, order_price, best_ask, orderbook) = if args.contrarian {
+        // Contrarian mode: bet AGAINST the skewed side at low price
+        if yes_price >= high_threshold {
+            // YES is skewed high (0.80), NO is cheap (~0.20), bet on NO
+            (
+                "NO",
+                &market.no_token_id,
+                limit_price,
+                no_price,
+                &market.no_asks,
+            )
+        } else if no_price >= high_threshold {
+            // NO is skewed high (0.80), YES is cheap (~0.20), bet on YES
+            (
+                "YES",
+                &market.yes_token_id,
+                limit_price,
+                yes_price,
+                &market.yes_asks,
+            )
+        } else {
+            debug!(
+                "Skipping {} - YES {} and NO {} both below threshold {} (contrarian)",
+                market.name, yes_price, no_price, high_threshold
+            );
+            return false;
+        }
+    } else {
+        // Normal mode: bet WITH the skewed side
+        if yes_price >= high_threshold {
+            (
+                "YES",
+                &market.yes_token_id,
+                yes_price,
+                yes_price,
+                &market.yes_asks,
+            )
+        } else if no_price >= high_threshold {
+            (
+                "NO",
+                &market.no_token_id,
+                no_price,
+                no_price,
+                &market.no_asks,
+            )
+        } else {
+            debug!(
+                "Skipping {} - YES {} and NO {} both below threshold {}",
+                market.name, yes_price, no_price, high_threshold
+            );
+            return false;
+        }
+    };
+
+    // Calculate effective fill price using orderbook depth
+    let fill_estimate = calculate_fill_price_with_slippage(
+        orderbook.as_ref(),
+        best_ask,
+        position_size / best_ask, // Estimate shares for fill calculation
+        slippage_pct,
+    );
+
+    // Check minimum depth if configured (only when we have actual orderbook data)
+    // When best_price_depth is 0, we're using slippage fallback and don't have depth info
+    if min_depth > dec!(0)
+        && fill_estimate.best_price_depth > dec!(0)
+        && fill_estimate.best_price_depth < min_depth
+    {
+        warn!(
+            "Skipping {} - depth {:.2} below minimum {:.2}",
+            market.name, fill_estimate.best_price_depth, min_depth
+        );
+        return false;
+    }
+
+    // Calculate shares based on effective fill price
+    let shares = (position_size / fill_estimate.effective_price).round_dp(2);
+
+    if shares > MAX_SHARES {
+        warn!(
+            "Skipping {} - calculated shares {} exceeds max {}",
+            market.name, shares, MAX_SHARES
+        );
+        return false;
+    }
+
+    // Sanity check on order price (only for non-contrarian)
+    if !args.contrarian {
+        if order_price < dec!(0.01) {
+            warn!(
+                "Skipping {} - market price {} too low",
+                market.name, order_price
+            );
+            return false;
+        }
+        if order_price > dec!(0.99) {
+            warn!(
+                "Skipping {} - market price {} too high",
+                market.name, order_price
+            );
+            return false;
+        }
+    }
+
+    let mode_label = if args.contrarian {
+        "CONTRARIAN"
+    } else {
+        "SIGNAL"
+    };
+
+    // Show effective fill price vs best ask in log
+    let slippage_info = if fill_estimate.effective_price != best_ask {
+        format!(
+            " (slippage: {:.1}%)",
+            ((fill_estimate.effective_price - best_ask) / best_ask * dec!(100))
+        )
+    } else {
+        String::new()
+    };
+
+    info!(
+        "[{}] {} {} @ ${:.4}{} ({:.2} shares, ${:.2}) - YES={}, NO={} - depth={:.2}",
+        mode_label,
+        side,
+        market.name,
+        fill_estimate.effective_price,
+        slippage_info,
+        shares,
+        position_size,
+        yes_price,
+        no_price,
+        fill_estimate.best_price_depth
+    );
+
+    if args.dry_run {
+        let cost = shares * fill_estimate.effective_price;
+        info!(
+            "[DRY RUN] {} {:.2} shares @ ${:.4} (best_ask: ${}, limit: ${}) -> Win: ${:.2}",
+            side,
+            shares,
+            fill_estimate.effective_price,
+            best_ask,
+            order_price,
+            shares - cost
+        );
+
+        portfolio.add_position(SimulatedPosition {
+            market_id: market.id,
+            condition_id: market.condition_id.clone(),
+            market_name: market.name.clone(),
+            market_type: market.market_type.clone(),
+            asset: market.asset.clone(),
+            timeframe: market.timeframe.clone(),
+            yes_token_id: market.yes_token_id.clone(),
+            no_token_id: market.no_token_id.clone(),
+            side: side.to_string(),
+            shares,
+            entry_price: order_price,
+            best_ask_price: best_ask,
+            effective_fill_price: fill_estimate.effective_price,
+            cost,
+            end_time: market.end_time,
+        });
+
+        traded_markets.insert(market.id);
+        return true;
+    }
+
+    // Execute trade
+    match execute_trade(
+        cached_auth,
+        token_id,
+        shares,
+        order_price,
+        side,
+        &market.name,
+    )
+    .await
+    {
+        Ok(order_id) => {
+            info!(
+                "[SUCCESS] Placed {} order {} for {} @ ${}",
+                side, order_id, market.name, order_price
+            );
+            traded_markets.insert(market.id);
+
+            if args.cancel_after_secs > 0 {
+                let cancel_at =
+                    Utc::now() + chrono::Duration::seconds(args.cancel_after_secs as i64);
+                pending_cancels.push(PendingCancel {
+                    order_id,
+                    market_name: market.name.clone(),
+                    cancel_at,
+                });
+                debug!(
+                    "[CANCEL] Scheduled cancellation for {} at {:?}",
+                    market.name, cancel_at
+                );
+            }
+            true
+        }
+        Err(e) => {
+            error!("[FAILED] Trade execution for {}: {:#}", market.name, e);
+            false
+        }
+    }
+}
+
 /// Run a single trading cycle
 async fn run_cycle(
     db: &Database,
@@ -470,9 +743,12 @@ async fn run_cycle(
 
     // Query markets expiring within the window
     let expiry_seconds = args.expiry_minutes * 60;
-    let markets = if args.only_15m_updown {
-        // Use filtered query for 15m up/down markets only
-        match get_15m_updown_markets_with_fresh_orderbooks(
+    let slippage_pct = Decimal::try_from(args.slippage_pct).unwrap_or(dec!(20));
+    let min_depth = Decimal::try_from(args.min_depth).unwrap_or(dec!(0));
+
+    // For 15m up/down markets, use orderbook depth for realistic fill prices
+    if args.only_15m_updown {
+        let markets = match get_15m_updown_markets_with_orderbooks(
             db.pool(),
             args.max_orderbook_age,
             assets,
@@ -485,10 +761,42 @@ async fn run_cycle(
                 error!("Failed to query 15m up/down markets: {:#}", e);
                 return;
             }
+        };
+
+        info!(
+            "Found {} markets expiring within {} minutes (with orderbook depth)",
+            markets.len(),
+            args.expiry_minutes
+        );
+
+        for market in &markets {
+            process_market_with_orderbook(
+                market,
+                args,
+                high_threshold,
+                position_size,
+                limit_price,
+                slippage_pct,
+                min_depth,
+                traded_markets,
+                cached_auth,
+                pending_cancels,
+                portfolio,
+            )
+            .await;
+        }
+
+        // Cleanup expired markets from tracking set
+        let now = Utc::now();
+        let before_count = traded_markets.len();
+        traded_markets.retain(|id| markets.iter().any(|m| m.id == *id && m.end_time > now));
+        let cleaned = before_count - traded_markets.len();
+        if cleaned > 0 {
+            debug!("Cleaned {} expired markets from tracking set", cleaned);
         }
     } else {
-        // Use general query for all markets
-        match get_markets_with_fresh_orderbooks(
+        // Use general query for all markets (without orderbook depth)
+        let markets = match get_markets_with_fresh_orderbooks(
             db.pool(),
             args.max_orderbook_age,
             assets,
@@ -501,207 +809,162 @@ async fn run_cycle(
                 error!("Failed to query markets: {:#}", e);
                 return;
             }
-        }
-    };
-
-    info!(
-        "Found {} markets expiring within {} minutes",
-        markets.len(),
-        args.expiry_minutes
-    );
-
-    // Process each market
-    for market in &markets {
-        // Skip if already traded
-        if traded_markets.contains(&market.id) {
-            debug!("Skipping {} - already traded", market.name);
-            continue;
-        }
-
-        // Get YES price (ask price to buy YES)
-        let yes_price = match market.yes_best_ask {
-            Some(p) if p > dec!(0) && p <= dec!(1) => p,
-            _ => {
-                debug!(
-                    "Skipping {} - invalid YES ask price: {:?}",
-                    market.name, market.yes_best_ask
-                );
-                continue;
-            }
         };
 
-        // Get NO price (ask price to buy NO)
-        let no_price = match market.no_best_ask {
-            Some(p) if p > dec!(0) && p <= dec!(1) => p,
-            _ => {
-                debug!(
-                    "Skipping {} - invalid NO ask price: {:?}",
-                    market.name, market.no_best_ask
-                );
-                continue;
-            }
-        };
-
-        // Determine which side to trade based on threshold and mode
-        // Returns: (side_to_bet, token_id, order_price, bet_side_market_price)
-        let (side, token_id, order_price, market_price) = if args.contrarian {
-            // Contrarian mode: bet AGAINST the skewed side at low price
-            if yes_price >= high_threshold {
-                // YES is skewed high (0.80), NO is cheap (~0.20), bet on NO
-                ("NO", &market.no_token_id, limit_price, no_price)
-            } else if no_price >= high_threshold {
-                // NO is skewed high (0.80), YES is cheap (~0.20), bet on YES
-                ("YES", &market.yes_token_id, limit_price, yes_price)
-            } else {
-                debug!(
-                    "Skipping {} - YES {} and NO {} both below threshold {} (contrarian)",
-                    market.name, yes_price, no_price, high_threshold
-                );
-                continue;
-            }
-        } else {
-            // Normal mode: bet WITH the skewed side
-            if yes_price >= high_threshold {
-                ("YES", &market.yes_token_id, yes_price, yes_price)
-            } else if no_price >= high_threshold {
-                ("NO", &market.no_token_id, no_price, no_price)
-            } else {
-                debug!(
-                    "Skipping {} - YES {} and NO {} both below threshold {}",
-                    market.name, yes_price, no_price, high_threshold
-                );
-                continue;
-            }
-        };
-
-        // Sanity check on order price (only for non-contrarian)
-        if !args.contrarian {
-            if order_price < dec!(0.01) {
-                warn!(
-                    "Skipping {} - market price {} too low",
-                    market.name, order_price
-                );
-                continue;
-            }
-            if order_price > dec!(0.99) {
-                warn!(
-                    "Skipping {} - market price {} too high",
-                    market.name, order_price
-                );
-                continue;
-            }
-        }
-
-        // Calculate shares based on actual market price (expected fill price)
-        // Limit order at 0.99 guarantees fill at market price
-        // Round to 2dp to match real execution
-        let shares = (position_size / market_price).round_dp(2);
-
-        if shares > MAX_SHARES {
-            warn!(
-                "Skipping {} - calculated shares {} exceeds max {}",
-                market.name, shares, MAX_SHARES
-            );
-            continue;
-        }
-
-        let mode_label = if args.contrarian {
-            "CONTRARIAN"
-        } else {
-            "SIGNAL"
-        };
         info!(
-            "[{}] {} {} @ ${:.2} ({:.2} shares, ${:.2}) - YES={}, NO={} - expires {:?}",
-            mode_label,
-            side,
-            market.name,
-            market_price,
-            shares,
-            position_size,
-            yes_price,
-            no_price,
-            market.end_time
+            "Found {} markets expiring within {} minutes",
+            markets.len(),
+            args.expiry_minutes
         );
 
-        if args.dry_run {
-            let cost = shares * market_price; // Actual cost at market price
-            info!(
-                "[DRY RUN] {} {:.2} shares @ ${} (limit: ${}) -> Win: ${:.2}",
-                side,
-                shares,
-                market_price,
-                order_price,
-                shares - cost
-            );
+        // Process each market (legacy mode without orderbook depth)
+        for market in &markets {
+            if traded_markets.contains(&market.id) {
+                debug!("Skipping {} - already traded", market.name);
+                continue;
+            }
 
-            // Add to simulated portfolio
-            portfolio.add_position(SimulatedPosition {
-                market_id: market.id,
-                condition_id: market.condition_id.clone(),
-                market_name: market.name.clone(),
-                market_type: market.market_type.clone(),
-                asset: market.asset.clone(),
-                timeframe: market.timeframe.clone(),
-                yes_token_id: market.yes_token_id.clone(),
-                no_token_id: market.no_token_id.clone(),
-                side: side.to_string(),
-                shares,
-                entry_price: order_price,
-                market_price,
-                cost,
-                end_time: market.end_time,
-            });
-
-            traded_markets.insert(market.id);
-            continue;
-        }
-
-        // Execute trade
-        match execute_trade(
-            cached_auth,
-            token_id,
-            shares,
-            order_price,
-            side,
-            &market.name,
-        )
-        .await
-        {
-            Ok(order_id) => {
-                info!(
-                    "[SUCCESS] Placed {} order {} for {} @ ${}",
-                    side, order_id, market.name, order_price
-                );
-                traded_markets.insert(market.id);
-
-                // Schedule cancellation if configured
-                if args.cancel_after_secs > 0 {
-                    let cancel_at =
-                        Utc::now() + chrono::Duration::seconds(args.cancel_after_secs as i64);
-                    pending_cancels.push(PendingCancel {
-                        order_id,
-                        market_name: market.name.clone(),
-                        cancel_at,
-                    });
+            let yes_price = match market.yes_best_ask {
+                Some(p) if p > dec!(0) && p <= dec!(1) => p,
+                _ => {
                     debug!(
-                        "[CANCEL] Scheduled cancellation for {} at {:?}",
-                        market.name, cancel_at
+                        "Skipping {} - invalid YES ask price: {:?}",
+                        market.name, market.yes_best_ask
                     );
+                    continue;
+                }
+            };
+
+            let no_price = match market.no_best_ask {
+                Some(p) if p > dec!(0) && p <= dec!(1) => p,
+                _ => {
+                    debug!(
+                        "Skipping {} - invalid NO ask price: {:?}",
+                        market.name, market.no_best_ask
+                    );
+                    continue;
+                }
+            };
+
+            let (side, token_id, order_price, market_price) = if args.contrarian {
+                if yes_price >= high_threshold {
+                    ("NO", &market.no_token_id, limit_price, no_price)
+                } else if no_price >= high_threshold {
+                    ("YES", &market.yes_token_id, limit_price, yes_price)
+                } else {
+                    debug!("Skipping {} - below threshold (contrarian)", market.name);
+                    continue;
+                }
+            } else {
+                if yes_price >= high_threshold {
+                    ("YES", &market.yes_token_id, yes_price, yes_price)
+                } else if no_price >= high_threshold {
+                    ("NO", &market.no_token_id, no_price, no_price)
+                } else {
+                    debug!("Skipping {} - below threshold", market.name);
+                    continue;
+                }
+            };
+
+            if !args.contrarian {
+                if order_price < dec!(0.01) || order_price > dec!(0.99) {
+                    warn!(
+                        "Skipping {} - price {} out of range",
+                        market.name, order_price
+                    );
+                    continue;
                 }
             }
-            Err(e) => {
-                error!("[ERROR] Failed to place order for {}: {:#}", market.name, e);
+
+            let shares = (position_size / market_price).round_dp(2);
+            if shares > MAX_SHARES {
+                warn!("Skipping {} - shares {} exceeds max", market.name, shares);
+                continue;
+            }
+
+            let mode_label = if args.contrarian {
+                "CONTRARIAN"
+            } else {
+                "SIGNAL"
+            };
+            info!(
+                "[{}] {} {} @ ${:.2} ({:.2} shares) - YES={}, NO={}",
+                mode_label, side, market.name, market_price, shares, yes_price, no_price
+            );
+
+            if args.dry_run {
+                let cost = shares * market_price;
+                info!(
+                    "[DRY RUN] {} {:.2} shares @ ${} -> Win: ${:.2} (no depth check)",
+                    side,
+                    shares,
+                    market_price,
+                    shares - cost
+                );
+
+                portfolio.add_position(SimulatedPosition {
+                    market_id: market.id,
+                    condition_id: market.condition_id.clone(),
+                    market_name: market.name.clone(),
+                    market_type: market.market_type.clone(),
+                    asset: market.asset.clone(),
+                    timeframe: market.timeframe.clone(),
+                    yes_token_id: market.yes_token_id.clone(),
+                    no_token_id: market.no_token_id.clone(),
+                    side: side.to_string(),
+                    shares,
+                    entry_price: order_price,
+                    best_ask_price: market_price,
+                    effective_fill_price: market_price, // No depth, assume best ask
+                    cost,
+                    end_time: market.end_time,
+                });
+
+                traded_markets.insert(market.id);
+                continue;
+            }
+
+            match execute_trade(
+                cached_auth,
+                token_id,
+                shares,
+                order_price,
+                side,
+                &market.name,
+            )
+            .await
+            {
+                Ok(order_id) => {
+                    info!(
+                        "[SUCCESS] Placed {} order {} for {} @ ${}",
+                        side, order_id, market.name, order_price
+                    );
+                    traded_markets.insert(market.id);
+
+                    if args.cancel_after_secs > 0 {
+                        let cancel_at =
+                            Utc::now() + chrono::Duration::seconds(args.cancel_after_secs as i64);
+                        pending_cancels.push(PendingCancel {
+                            order_id,
+                            market_name: market.name.clone(),
+                            cancel_at,
+                        });
+                    }
+                }
+                Err(e) => {
+                    error!("[ERROR] Failed to place order for {}: {:#}", market.name, e);
+                }
             }
         }
-    }
 
-    // Cleanup expired markets from tracking set
-    let now = Utc::now();
-    let before_count = traded_markets.len();
-    traded_markets.retain(|id| markets.iter().any(|m| m.id == *id && m.end_time > now));
-    let cleaned = before_count - traded_markets.len();
-    if cleaned > 0 {
-        debug!("Cleaned {} expired markets from tracking set", cleaned);
+        // Cleanup expired markets from tracking set
+        let now = Utc::now();
+        let before_count = traded_markets.len();
+        traded_markets.retain(|id| markets.iter().any(|m| m.id == *id && m.end_time > now));
+        let cleaned = before_count - traded_markets.len();
+        if cleaned > 0 {
+            debug!("Cleaned {} expired markets from tracking set", cleaned);
+        }
     }
 
     let elapsed = cycle_start.elapsed();
