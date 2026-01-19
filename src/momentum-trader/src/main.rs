@@ -178,8 +178,12 @@ async fn main() -> Result<()> {
 
     // Main loop with graceful shutdown
     let mut last_cycle_time = std::time::Instant::now();
-    let mut last_metrics_time = std::time::Instant::now();
     let mut last_cleanup_time = std::time::Instant::now();
+    let mut klines_since_heartbeat: u64 = 0;
+
+    // Independent heartbeat timer (every 60 seconds)
+    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -187,11 +191,23 @@ async fn main() -> Result<()> {
                 info!("Received shutdown signal, exiting...");
                 break;
             }
+            _ = heartbeat_interval.tick() => {
+                // Heartbeat: print metrics and portfolio summary
+                info!("[ALIVE] Heartbeat - klines received: {}", klines_since_heartbeat);
+                klines_since_heartbeat = 0;
+                metrics.print_summary();
+                if args.dry_run {
+                    portfolio.print_summary();
+                    // Also resolve any expired positions during heartbeat
+                    portfolio.resolve_expired(db.pool(), &gamma).await;
+                }
+            }
             kline_opt = binance_ws.next_kline() => {
                 match kline_opt {
                     Some(kline) => {
                         // Add kline to buffer
                         kline_buffer.add(kline.clone());
+                        klines_since_heartbeat += 1;
 
                         // Check if we should run a trading cycle (every 1 second)
                         if last_cycle_time.elapsed() >= Duration::from_secs(1) {
@@ -216,15 +232,6 @@ async fn main() -> Result<()> {
                                 position_size,
                                 slippage_pct,
                             ).await;
-                        }
-
-                        // Print metrics every 60 seconds
-                        if last_metrics_time.elapsed() >= Duration::from_secs(60) {
-                            last_metrics_time = std::time::Instant::now();
-                            metrics.print_summary();
-                            if args.dry_run {
-                                portfolio.print_summary();
-                            }
                         }
 
                         // Cleanup cooldowns every 5 minutes
