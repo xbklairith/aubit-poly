@@ -499,3 +499,22 @@ pub async fn cancel_order(cached_auth: &mut Option<CachedAuth>, order_id: &str) 
 
     Ok(())
 }
+
+/// Cancel an order on Polymarket (standalone - creates own auth).
+/// Use this when you need to cancel from a spawned task.
+pub async fn cancel_order_standalone(order_id: String) -> Result<()> {
+    let mut auth: Option<CachedAuth> = None;
+    ensure_authenticated(&mut auth).await?;
+
+    let auth = auth.as_ref().unwrap();
+
+    timeout(
+        Duration::from_secs(10),
+        auth.client.cancel_order(&order_id),
+    )
+    .await
+    .context("Order cancellation timed out")?
+    .context("Failed to cancel order")?;
+
+    Ok(())
+}

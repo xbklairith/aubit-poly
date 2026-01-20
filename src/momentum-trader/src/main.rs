@@ -18,9 +18,9 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use common::{
-    calculate_fill_price_with_slippage, execute_trade, get_15m_updown_markets_with_orderbooks,
-    BinanceWsClient, CachedAuth, Config, Database, DryRunPortfolio, GammaClient, KlineBuffer,
-    MomentumDirection, SimulatedPosition, MAX_SHARES,
+    calculate_fill_price_with_slippage, cancel_order_standalone, execute_trade,
+    get_15m_updown_markets_with_orderbooks, BinanceWsClient, CachedAuth, Config, Database,
+    DryRunPortfolio, GammaClient, KlineBuffer, MomentumDirection, SimulatedPosition, MAX_SHARES,
 };
 
 mod detector;
@@ -43,7 +43,7 @@ struct Args {
     lookback_minutes: u64,
 
     /// Maximum entry price on Polymarket (skip if price > this)
-    #[arg(long, default_value = "0.99")]
+    #[arg(long, default_value = "0.70")]
     max_entry_price: f64,
 
     /// Position size in USDC
@@ -63,7 +63,7 @@ struct Args {
     cooldown_secs: u64,
 
     /// Maximum orderbook age in seconds
-    #[arg(long, default_value = "5")]
+    #[arg(long, default_value = "1")]
     max_orderbook_age: i32,
 
     /// Assets to trade (comma-separated)
@@ -167,7 +167,8 @@ async fn main() -> Result<()> {
     let mut metrics = Metrics::new();
     let mut portfolio = DryRunPortfolio::new();
     let mut cached_auth: Option<CachedAuth> = None;
-    let mut traded_markets: HashSet<Uuid> = HashSet::new();
+    // Track (market_id, side) - allows trading both YES and NO on same market
+    let mut traded_positions: HashSet<(Uuid, String)> = HashSet::new();
 
     // Connect to Binance WebSocket
     let binance_client = BinanceWsClient::new(binance_symbols.clone());
@@ -223,7 +224,7 @@ async fn main() -> Result<()> {
                                 &mut metrics,
                                 &mut portfolio,
                                 &mut cached_auth,
-                                &mut traded_markets,
+                                &mut traded_positions,
                                 position_size,
                                 slippage_pct,
                             ).await;
@@ -277,7 +278,7 @@ async fn run_cycle(
     metrics: &mut Metrics,
     portfolio: &mut DryRunPortfolio,
     cached_auth: &mut Option<CachedAuth>,
-    traded_markets: &mut HashSet<Uuid>,
+    traded_positions: &mut HashSet<(Uuid, String)>,
     position_size: Decimal,
     slippage_pct: Decimal,
 ) {
@@ -354,7 +355,7 @@ async fn run_cycle(
         // Find matching market for this asset
         let matching_market = markets
             .iter()
-            .find(|m| m.asset.to_uppercase() == *asset && !traded_markets.contains(&m.id));
+            .find(|m| m.asset.to_uppercase() == *asset);
 
         let market = match matching_market {
             Some(m) => m,
@@ -363,6 +364,18 @@ async fn run_cycle(
                 continue;
             }
         };
+
+        // Determine side first to check if already traded
+        let side = match direction {
+            MomentumDirection::Up => "YES",
+            MomentumDirection::Down => "NO",
+        };
+
+        // Check if this specific (market, side) already traded
+        if traded_positions.contains(&(market.id, side.to_string())) {
+            debug!("Already traded {} on {}", side, market.name);
+            continue;
+        }
 
         // Check cooldown
         if !detector.can_trade(&market.condition_id) {
@@ -454,7 +467,7 @@ async fn run_cycle(
                 last_retry_time: None,
             });
 
-            traded_markets.insert(market.id);
+            traded_positions.insert((market.id, side.to_string()));
             detector.record_trade(&market.condition_id);
             metrics.record_trade(asset, side);
         } else {
@@ -471,12 +484,26 @@ async fn run_cycle(
             {
                 Ok(order_id) => {
                     info!(
-                        "[SUCCESS] Order {} for {} @ ${}",
-                        order_id, market.name, entry_price
+                        "[SUCCESS] Order {} for {} {} @ ${}",
+                        order_id, side, market.name, entry_price
                     );
-                    traded_markets.insert(market.id);
+                    traded_positions.insert((market.id, side.to_string()));
                     detector.record_trade(&market.condition_id);
                     metrics.record_trade(asset, side);
+
+                    // Cancel order after 10 seconds if not filled
+                    let order_id_for_cancel = order_id.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        match cancel_order_standalone(order_id_for_cancel.clone()).await {
+                            Ok(()) => {
+                                info!("[CANCEL] Order {} cancelled after 10s timeout", order_id_for_cancel);
+                            }
+                            Err(e) => {
+                                debug!("Cancel order {} (may already be filled): {}", order_id_for_cancel, e);
+                            }
+                        }
+                    });
                 }
                 Err(e) => {
                     error!("[FAILED] Trade execution: {:#}", e);
@@ -487,12 +514,12 @@ async fn run_cycle(
     }
 
     // Cleanup expired markets from tracking
-    let before = traded_markets.len();
-    traded_markets.retain(|id| markets.iter().any(|m| m.id == *id && m.end_time > now));
-    if traded_markets.len() < before {
+    let before = traded_positions.len();
+    traded_positions.retain(|(id, _)| markets.iter().any(|m| m.id == *id && m.end_time > now));
+    if traded_positions.len() < before {
         debug!(
-            "Cleaned {} expired markets from tracking",
-            before - traded_markets.len()
+            "Cleaned {} expired positions from tracking",
+            before - traded_positions.len()
         );
     }
 }
