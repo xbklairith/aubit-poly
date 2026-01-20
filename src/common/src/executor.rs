@@ -31,7 +31,16 @@ const ORDER_TIMEOUT_SECS: u64 = 30;
 pub const MAX_SHARES: Decimal = dec!(99.99);
 
 /// Maximum resolution retry attempts before force-expiring a position
-const MAX_RESOLUTION_RETRIES: u32 = 10;
+const MAX_RESOLUTION_RETRIES: u32 = 30; // 30 retries with backoff = ~2 hours total
+
+/// Calculate backoff delay in seconds based on retry count.
+/// Uses exponential backoff: 60s, 120s, 240s... capped at 600s (10 min)
+fn resolution_backoff_secs(retries: u32) -> i64 {
+    let base_delay = 60i64; // Start with 60 seconds
+    let max_delay = 600i64; // Cap at 10 minutes
+    let delay = base_delay * (1i64 << retries.min(4)); // 2^retries, max 2^4=16
+    delay.min(max_delay)
+}
 
 /// Simulated position for dry-run portfolio tracking.
 #[derive(Debug, Clone)]
@@ -60,6 +69,8 @@ pub struct SimulatedPosition {
     pub created_at: DateTime<Utc>,
     /// Number of resolution fetch attempts
     pub resolution_retries: u32,
+    /// Last time we attempted to fetch resolution
+    pub last_retry_time: Option<DateTime<Utc>>,
 }
 
 /// Dry-run portfolio tracker.
@@ -122,6 +133,17 @@ impl DryRunPortfolio {
             let winning_side = if let Some(ws) = resolution_map.get(&pos.market_id) {
                 ws.clone()
             } else {
+                // Check backoff: skip if not enough time has passed since last retry
+                let backoff_secs = resolution_backoff_secs(pos.resolution_retries);
+                if let Some(last_retry) = pos.last_retry_time {
+                    let elapsed = (now - last_retry).num_seconds();
+                    if elapsed < backoff_secs {
+                        // Not ready to retry yet, put back in queue
+                        self.positions.push(pos);
+                        continue;
+                    }
+                }
+
                 // Rate limit: add delay between API calls (max 2 per second)
                 if api_calls_made > 0 {
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -160,6 +182,7 @@ impl DryRunPortfolio {
                         // Not resolved yet - put back in queue with incremented retry count
                         let mut pos = pos;
                         pos.resolution_retries += 1;
+                        pos.last_retry_time = Some(now);
                         if pos.resolution_retries >= MAX_RESOLUTION_RETRIES {
                             warn!(
                                 "[PORTFOLIO] ⚠️ EXPIRED: {} - max retries ({}) exceeded, treating as loss",
@@ -170,9 +193,10 @@ impl DryRunPortfolio {
                             self.realized_losses += 1;
                             continue;
                         }
+                        let next_backoff = resolution_backoff_secs(pos.resolution_retries);
                         debug!(
-                            "[PORTFOLIO] Market {} not yet resolved (retry {}/{}), will check again",
-                            pos.market_name, pos.resolution_retries, MAX_RESOLUTION_RETRIES
+                            "[PORTFOLIO] Market {} not yet resolved (retry {}/{}, next in {}s)",
+                            pos.market_name, pos.resolution_retries, MAX_RESOLUTION_RETRIES, next_backoff
                         );
                         self.positions.push(pos);
                         continue;
@@ -181,6 +205,7 @@ impl DryRunPortfolio {
                         // API error - put back with incremented retry count
                         let mut pos = pos;
                         pos.resolution_retries += 1;
+                        pos.last_retry_time = Some(now);
                         if pos.resolution_retries >= MAX_RESOLUTION_RETRIES {
                             warn!(
                                 "[PORTFOLIO] ⚠️ EXPIRED: {} - max retries ({}) exceeded after API errors, treating as loss",
@@ -191,9 +216,10 @@ impl DryRunPortfolio {
                             self.realized_losses += 1;
                             continue;
                         }
+                        let next_backoff = resolution_backoff_secs(pos.resolution_retries);
                         warn!(
-                            "[PORTFOLIO] Failed to fetch resolution for {} (retry {}/{}): {}",
-                            pos.market_name, pos.resolution_retries, MAX_RESOLUTION_RETRIES, e
+                            "[PORTFOLIO] Failed to fetch resolution for {} (retry {}/{}, next in {}s): {}",
+                            pos.market_name, pos.resolution_retries, MAX_RESOLUTION_RETRIES, next_backoff, e
                         );
                         self.positions.push(pos);
                         continue;

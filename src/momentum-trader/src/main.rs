@@ -213,11 +213,6 @@ async fn main() -> Result<()> {
                         if last_cycle_time.elapsed() >= Duration::from_secs(1) {
                             last_cycle_time = std::time::Instant::now();
 
-                            // Resolve expired positions in dry-run mode
-                            if args.dry_run {
-                                portfolio.resolve_expired(db.pool(), &gamma).await;
-                            }
-
                             // Run trading cycle
                             run_cycle(
                                 &db,
@@ -456,6 +451,7 @@ async fn run_cycle(
                 end_time: market.end_time,
                 created_at: Utc::now(),
                 resolution_retries: 0,
+                last_retry_time: None,
             });
 
             traded_markets.insert(market.id);
