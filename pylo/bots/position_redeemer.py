@@ -6,6 +6,7 @@ This module handles redemption of winning positions through:
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -206,6 +207,60 @@ class MarketResolution:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# RPC Rate Limit Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Minimum delay between RPC calls (seconds)
+RPC_CALL_DELAY = 0.2
+
+
+def rpc_call_with_retry(func, max_retries: int = 5, base_delay: float = 10.0):
+    """Execute an RPC call with exponential backoff retry on rate limit.
+
+    Args:
+        func: Callable that makes the RPC call
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds (doubles each retry)
+
+    Returns:
+        Result of the RPC call
+
+    Raises:
+        Exception: If all retries exhausted
+    """
+    last_error = None
+    delay = base_delay
+
+    for attempt in range(max_retries + 1):
+        try:
+            # Add small delay between all calls to avoid hitting rate limit
+            if attempt > 0:
+                logger.info(
+                    f"  Retrying RPC call (attempt {attempt + 1}/{max_retries + 1}) after {delay:.0f}s..."
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 120)  # Cap at 2 minutes
+            else:
+                time.sleep(RPC_CALL_DELAY)
+
+            return func()
+
+        except Exception as e:
+            error_msg = str(e)
+            # Check if it's a rate limit error
+            if "rate limit" in error_msg.lower() or "-32090" in error_msg:
+                last_error = e
+                logger.warning("  RPC rate limit hit, will retry...")
+                continue
+            else:
+                # Non-rate-limit error, raise immediately
+                raise
+
+    # All retries exhausted
+    raise last_error or Exception("RPC call failed after max retries")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Position Redeemer
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -355,7 +410,10 @@ class PositionRedeemer:
         condition_bytes = Web3.to_bytes(hexstr=condition_id)
 
         # Check payout denominator - if > 0, market is resolved
-        payout_denom = self.ctf_contract.functions.payoutDenominator(condition_bytes).call()
+        # Use retry wrapper to handle RPC rate limits
+        payout_denom = rpc_call_with_retry(
+            lambda: self.ctf_contract.functions.payoutDenominator(condition_bytes).call()
+        )
 
         if payout_denom == 0:
             return MarketResolution(
@@ -365,8 +423,12 @@ class PositionRedeemer:
 
         # Get winning outcome (check numerators)
         # For binary markets: index 0 = YES, index 1 = NO
-        yes_payout = self.ctf_contract.functions.payoutNumerators(condition_bytes, 0).call()
-        no_payout = self.ctf_contract.functions.payoutNumerators(condition_bytes, 1).call()
+        yes_payout = rpc_call_with_retry(
+            lambda: self.ctf_contract.functions.payoutNumerators(condition_bytes, 0).call()
+        )
+        no_payout = rpc_call_with_retry(
+            lambda: self.ctf_contract.functions.payoutNumerators(condition_bytes, 1).call()
+        )
 
         winning_outcome = None
         if yes_payout > 0:
@@ -397,7 +459,9 @@ class PositionRedeemer:
         # Token ID in CTF is the positionId
         position_id = int(token_id)
 
-        balance = self.ctf_contract.functions.balanceOf(address, position_id).call()
+        balance = rpc_call_with_retry(
+            lambda: self.ctf_contract.functions.balanceOf(address, position_id).call()
+        )
 
         return balance
 
@@ -573,8 +637,8 @@ class PositionRedeemer:
             if not self.safe_contract:
                 return RedemptionResult(success=False, error="Safe contract not initialized")
 
-            # Get Safe nonce
-            nonce = self.safe_contract.functions.nonce().call()
+            # Get Safe nonce (with retry for rate limits)
+            nonce = rpc_call_with_retry(lambda: self.safe_contract.functions.nonce().call())
 
             # Parameters for execTransaction
             to = CTF_ADDRESS
@@ -586,19 +650,21 @@ class PositionRedeemer:
             gas_token = NULL_ADDRESS
             refund_receiver = NULL_ADDRESS
 
-            # Get transaction hash for signing
-            tx_hash = self.safe_contract.functions.getTransactionHash(
-                to,
-                value,
-                Web3.to_bytes(hexstr=data),
-                operation,
-                safe_tx_gas,
-                base_gas,
-                gas_price,
-                gas_token,
-                refund_receiver,
-                nonce,
-            ).call()
+            # Get transaction hash for signing (with retry for rate limits)
+            tx_hash = rpc_call_with_retry(
+                lambda: self.safe_contract.functions.getTransactionHash(
+                    to,
+                    value,
+                    Web3.to_bytes(hexstr=data),
+                    operation,
+                    safe_tx_gas,
+                    base_gas,
+                    gas_price,
+                    gas_token,
+                    refund_receiver,
+                    nonce,
+                ).call()
+            )
 
             # Sign the hash
             # For 1-of-1 Safe, we need a single signature
@@ -761,8 +827,8 @@ class PositionRedeemer:
             relayer_nonce = int(nonce_data.get("nonce", 0))
             logger.info(f"Got relayer nonce: {relayer_nonce}")
 
-            # Get the actual Safe contract nonce for signing
-            safe_nonce = self.safe_contract.functions.nonce().call()
+            # Get the actual Safe contract nonce for signing (with retry for rate limits)
+            safe_nonce = rpc_call_with_retry(lambda: self.safe_contract.functions.nonce().call())
             logger.info(f"Got Safe contract nonce: {safe_nonce}")
 
             # Step 2: Build and sign Safe transaction
@@ -781,18 +847,23 @@ class PositionRedeemer:
                     error="Safe contract not initialized",
                 )
 
-            safe_tx_hash = self.safe_contract.functions.getTransactionHash(
-                CTF_ADDRESS,  # to
-                0,  # value
-                Web3.to_bytes(hexstr=redeem_data),  # data
-                operation,
-                safe_tx_gas,
-                base_gas,
-                gas_price,
-                gas_token,
-                refund_receiver,
-                safe_nonce,  # Use Safe contract nonce for signing
-            ).call()
+            # Capture variables for lambda closure
+            _redeem_data = redeem_data
+            _safe_nonce = safe_nonce
+            safe_tx_hash = rpc_call_with_retry(
+                lambda: self.safe_contract.functions.getTransactionHash(
+                    CTF_ADDRESS,  # to
+                    0,  # value
+                    Web3.to_bytes(hexstr=_redeem_data),  # data
+                    operation,
+                    safe_tx_gas,
+                    base_gas,
+                    gas_price,
+                    gas_token,
+                    refund_receiver,
+                    _safe_nonce,  # Use Safe contract nonce for signing
+                ).call()
+            )
 
             # Sign the Safe transaction hash using eth_sign method
             # This adds the "\x19Ethereum Signed Message:\n32" prefix
