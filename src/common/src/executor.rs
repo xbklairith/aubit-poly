@@ -196,7 +196,10 @@ impl DryRunPortfolio {
                         let next_backoff = resolution_backoff_secs(pos.resolution_retries);
                         debug!(
                             "[PORTFOLIO] Market {} not yet resolved (retry {}/{}, next in {}s)",
-                            pos.market_name, pos.resolution_retries, MAX_RESOLUTION_RETRIES, next_backoff
+                            pos.market_name,
+                            pos.resolution_retries,
+                            MAX_RESOLUTION_RETRIES,
+                            next_backoff
                         );
                         self.positions.push(pos);
                         continue;
@@ -489,13 +492,10 @@ pub async fn execute_trade(
 pub async fn cancel_order(cached_auth: &mut Option<CachedAuth>, order_id: &str) -> Result<()> {
     let auth = ensure_authenticated(cached_auth).await?;
 
-    timeout(
-        Duration::from_secs(10),
-        auth.client.cancel_order(order_id),
-    )
-    .await
-    .context("Order cancellation timed out")?
-    .context("Failed to cancel order")?;
+    timeout(Duration::from_secs(10), auth.client.cancel_order(order_id))
+        .await
+        .context("Order cancellation timed out")?
+        .context("Failed to cancel order")?;
 
     Ok(())
 }
@@ -508,13 +508,10 @@ pub async fn cancel_order_standalone(order_id: String) -> Result<()> {
 
     let auth = auth.as_ref().unwrap();
 
-    timeout(
-        Duration::from_secs(10),
-        auth.client.cancel_order(&order_id),
-    )
-    .await
-    .context("Order cancellation timed out")?
-    .context("Failed to cancel order")?;
+    timeout(Duration::from_secs(10), auth.client.cancel_order(&order_id))
+        .await
+        .context("Order cancellation timed out")?
+        .context("Failed to cancel order")?;
 
     Ok(())
 }

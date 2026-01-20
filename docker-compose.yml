@@ -128,6 +128,29 @@ services:
     networks:
       - aubit-net
 
+  misprice-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: misprice-trader
+    entrypoint: ["misprice-trader"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: >
+      --dry-run
+      --limit-price 0.40
+      --position-size 5
+      --max-expiry-minutes 10
+      --min-expiry-minutes 1
+      --max-orderbook-age 1
+      --assets BTC
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
   poly-check:
     build:
       context: .

@@ -19,8 +19,9 @@ use uuid::Uuid;
 
 use common::{
     calculate_fill_price_with_slippage, cancel_order_standalone, execute_trade,
-    get_15m_updown_markets_with_orderbooks, BinanceWsClient, CachedAuth, Config, Database,
-    DryRunPortfolio, GammaClient, KlineBuffer, MomentumDirection, SimulatedPosition, MAX_SHARES,
+    get_15m_updown_markets_with_orderbooks, BinanceEvent, BinanceStreamType, BinanceWsClient,
+    CachedAuth, Config, Database, DryRunPortfolio, GammaClient, KlineBuffer, MomentumDirection,
+    SimulatedPosition, MAX_SHARES,
 };
 
 mod detector;
@@ -170,10 +171,11 @@ async fn main() -> Result<()> {
     // Track (market_id, side) - allows trading both YES and NO on same market
     let mut traded_positions: HashSet<(Uuid, String)> = HashSet::new();
 
-    // Connect to Binance WebSocket
-    let binance_client = BinanceWsClient::new(binance_symbols.clone());
+    // Connect to Binance WebSocket (Both = bookTicker for real-time + klines for momentum)
+    let binance_client =
+        BinanceWsClient::with_stream_type(binance_symbols.clone(), BinanceStreamType::Both);
 
-    info!("Connecting to Binance WebSocket...");
+    info!("Connecting to Binance WebSocket (bookTicker + klines)...");
     let mut binance_ws = binance_client.connect_with_retry(5).await?;
     info!("Connected to Binance WebSocket");
 
@@ -203,15 +205,24 @@ async fn main() -> Result<()> {
                     portfolio.resolve_expired(db.pool(), &gamma).await;
                 }
             }
-            kline_opt = binance_ws.next_kline() => {
-                match kline_opt {
-                    Some(kline) => {
-                        // Add kline to buffer
-                        kline_buffer.add(kline.clone());
-                        klines_since_heartbeat += 1;
+            event_opt = binance_ws.next_event() => {
+                match event_opt {
+                    Some(event) => {
+                        // Handle both ticker and kline events
+                        match event {
+                            BinanceEvent::Ticker(ticker) => {
+                                // Update price buffer from real-time ticker (~10ms updates)
+                                kline_buffer.update_price(&ticker);
+                                klines_since_heartbeat += 1;
+                            }
+                            BinanceEvent::Kline(kline) => {
+                                // Add kline to buffer for momentum calculation
+                                kline_buffer.add(kline);
+                            }
+                        }
 
-                        // Check if we should run a trading cycle (every 1 second)
-                        if last_cycle_time.elapsed() >= Duration::from_secs(1) {
+                        // Check if we should run a trading cycle (every 500ms for faster response)
+                        if last_cycle_time.elapsed() >= Duration::from_millis(500) {
                             last_cycle_time = std::time::Instant::now();
 
                             // Run trading cycle
@@ -353,9 +364,7 @@ async fn run_cycle(
         metrics.record_signal(asset);
 
         // Find matching market for this asset
-        let matching_market = markets
-            .iter()
-            .find(|m| m.asset.to_uppercase() == *asset);
+        let matching_market = markets.iter().find(|m| m.asset.to_uppercase() == *asset);
 
         let market = match matching_market {
             Some(m) => m,
@@ -497,10 +506,16 @@ async fn run_cycle(
                         tokio::time::sleep(Duration::from_secs(10)).await;
                         match cancel_order_standalone(order_id_for_cancel.clone()).await {
                             Ok(()) => {
-                                info!("[CANCEL] Order {} cancelled after 10s timeout", order_id_for_cancel);
+                                info!(
+                                    "[CANCEL] Order {} cancelled after 10s timeout",
+                                    order_id_for_cancel
+                                );
                             }
                             Err(e) => {
-                                debug!("Cancel order {} (may already be filled): {}", order_id_for_cancel, e);
+                                debug!(
+                                    "Cancel order {} (may already be filled): {}",
+                                    order_id_for_cancel, e
+                                );
                             }
                         }
                     });

@@ -272,7 +272,7 @@ impl ClobClient {
         asset_ids: Vec<String>,
     ) -> Result<(), ClobError> {
         const BATCH_SIZE: usize = 100;
-        let total_batches = (asset_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+        let total_batches = asset_ids.len().div_ceil(BATCH_SIZE);
 
         info!(
             "Subscribing to {} assets in {} batches",
@@ -316,7 +316,7 @@ impl ClobClient {
     ) -> Result<Vec<ClobMessage>, ClobError> {
         const BATCH_SIZE: usize = 100;
         let mut buffered_messages = Vec::new();
-        let total_batches = (asset_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+        let total_batches = asset_ids.len().div_ceil(BATCH_SIZE);
 
         info!(
             "Subscribing to {} assets in {} batches (with concurrent read)",

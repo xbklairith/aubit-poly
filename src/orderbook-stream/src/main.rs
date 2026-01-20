@@ -15,9 +15,9 @@ use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 use common::{
-    get_active_markets_expiring_within, get_priority_markets_hybrid, BookMessage, ClobClient,
-    ClobMessage, Config, Database, PriceChange, PriceLevel, update_no_best_prices,
-    update_yes_best_prices,
+    get_active_markets_expiring_within, get_priority_markets_hybrid, update_no_best_prices,
+    update_yes_best_prices, BookMessage, ClobClient, ClobMessage, Config, Database, PriceChange,
+    PriceLevel,
 };
 
 /// Maximum age (in ms) for buffered messages to be considered fresh.
@@ -346,7 +346,9 @@ async fn run_stream(clob: &ClobClient, db: &Database, args: &Args) -> Result<()>
 
                 for change in &pc.price_changes {
                     if let Some(&(market_id, is_yes)) = token_to_market.get(&change.asset_id) {
-                        let orderbook = orderbooks.entry(market_id).or_insert_with(MarketOrderbook::new);
+                        let orderbook = orderbooks
+                            .entry(market_id)
+                            .or_insert_with(MarketOrderbook::new);
 
                         // Track old best prices to detect changes
                         let (old_best_bid, old_best_ask) = if is_yes {

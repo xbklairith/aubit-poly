@@ -1692,7 +1692,8 @@ impl TradeExecutor {
 
                             // Try to sell at a price slightly below market (more likely to fill)
                             // Use the opposite side's best bid price minus a small buffer
-                            let recovery_price = (Decimal::ONE - first_price - dec!(0.01)).max(dec!(0.01));
+                            let recovery_price =
+                                (Decimal::ONE - first_price - dec!(0.01)).max(dec!(0.01));
                             info!(
                                 "[SEQUENTIAL] Recovery sell: {} @ ${} (GTC limit)",
                                 first_filled, recovery_price
@@ -1738,7 +1739,8 @@ impl TradeExecutor {
                                                         );
                                                         sell_succeeded = true;
                                                     } else {
-                                                        sell_error = Some("Order rejected".to_string());
+                                                        sell_error =
+                                                            Some("Order rejected".to_string());
                                                         error!(
                                                             "[SEQUENTIAL] Recovery GTC sell REJECTED: {:?}",
                                                             sell_result
@@ -1746,18 +1748,24 @@ impl TradeExecutor {
                                                     }
                                                 }
                                                 Ok(Err(e)) => {
-                                                    sell_error = Some(format!("Post failed: {:?}", e));
+                                                    sell_error =
+                                                        Some(format!("Post failed: {:?}", e));
                                                     error!("[SEQUENTIAL] Recovery sell post failed: {:?}", e);
                                                 }
                                                 Err(_) => {
                                                     sell_error = Some("Post timed out".to_string());
-                                                    error!("[SEQUENTIAL] Recovery sell post timed out");
+                                                    error!(
+                                                        "[SEQUENTIAL] Recovery sell post timed out"
+                                                    );
                                                 }
                                             }
                                         }
                                         Ok(Err(e)) => {
                                             sell_error = Some(format!("Sign failed: {:?}", e));
-                                            error!("[SEQUENTIAL] Recovery sell sign failed: {:?}", e);
+                                            error!(
+                                                "[SEQUENTIAL] Recovery sell sign failed: {:?}",
+                                                e
+                                            );
                                         }
                                         Err(_) => {
                                             sell_error = Some("Sign timed out".to_string());
@@ -1920,7 +1928,8 @@ impl TradeExecutor {
                                                         );
                                                         sell_succeeded = true;
                                                     } else {
-                                                        sell_error = Some("Order rejected".to_string());
+                                                        sell_error =
+                                                            Some("Order rejected".to_string());
                                                         error!(
                                                             "[SEQUENTIAL] Recovery sell REJECTED: {:?}",
                                                             sell_result
@@ -1928,7 +1937,8 @@ impl TradeExecutor {
                                                     }
                                                 }
                                                 Ok(Err(e)) => {
-                                                    sell_error = Some(format!("Post failed: {:?}", e));
+                                                    sell_error =
+                                                        Some(format!("Post failed: {:?}", e));
                                                     error!(
                                                         "[SEQUENTIAL] Recovery sell post failed: {:?}",
                                                         e

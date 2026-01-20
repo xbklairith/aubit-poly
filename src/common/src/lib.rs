@@ -18,7 +18,8 @@ pub mod models;
 pub mod repository;
 
 pub use binance_ws::{
-    BinanceKline, BinanceWsClient, BinanceWsStream, KlineBuffer, MomentumDirection,
+    BinanceBookTicker, BinanceEvent, BinanceKline, BinanceStreamType, BinanceWsClient,
+    BinanceWsStream, KlineBuffer, MomentumDirection,
 };
 pub use clob::{BookMessage, ClobClient, ClobMessage, PriceChange, PriceChangeMessage, PriceLevel};
 pub use config::Config;

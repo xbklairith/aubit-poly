@@ -358,7 +358,10 @@ async fn main() -> Result<()> {
                         }
 
                         if !args.all && market_list.len() > 15 {
-                            println!("\n  ... and {} more markets (use --all to show all)", market_list.len() - 15);
+                            println!(
+                                "\n  ... and {} more markets (use --all to show all)",
+                                market_list.len() - 15
+                            );
                         }
                     }
                 } else {
@@ -430,14 +433,18 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
     let db = common::Database::connect(&config).await?;
 
     // Parse assets
-    let assets: Vec<String> = args.audit_assets.split(',').map(|s| s.trim().to_string()).collect();
+    let assets: Vec<String> = args
+        .audit_assets
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
     println!("\nAuditing assets: {:?}", assets);
     println!("Max markets: {}", args.audit_limit);
 
     // Step 1: Get list of active markets from DB (just market info, no orderbook requirement)
     let all_markets = common::get_active_markets_expiring_within(
         db.pool(),
-        1,  // 1 hour expiry
+        1, // 1 hour expiry
         args.audit_limit,
     )
     .await?;
@@ -446,7 +453,10 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
     let markets: Vec<_> = if assets.iter().any(|a| a.eq_ignore_ascii_case("ALL")) {
         all_markets
     } else {
-        all_markets.into_iter().filter(|m| assets.contains(&m.asset)).collect()
+        all_markets
+            .into_iter()
+            .filter(|m| assets.contains(&m.asset))
+            .collect()
     };
 
     if markets.is_empty() {
@@ -479,7 +489,10 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
         let snapshot = common::get_latest_orderbook_snapshot(db.pool(), market.id).await?;
         let db_elapsed_ms = db_start.elapsed().as_millis();
 
-        println!("  API fetch: {}ms, DB fetch: {}ms", api_elapsed_ms, db_elapsed_ms);
+        println!(
+            "  API fetch: {}ms, DB fetch: {}ms",
+            api_elapsed_ms, db_elapsed_ms
+        );
 
         if let Some(snap) = snapshot {
             let age_secs = (Utc::now() - snap.captured_at).num_seconds();
@@ -487,8 +500,14 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
 
             // Step 3: Compare API vs DB (minimal time skew now)
             println!("\n  DB Prices:");
-            println!("    YES: ask={:?}, bid={:?}", snap.yes_best_ask, snap.yes_best_bid);
-            println!("    NO:  ask={:?}, bid={:?}", snap.no_best_ask, snap.no_best_bid);
+            println!(
+                "    YES: ask={:?}, bid={:?}",
+                snap.yes_best_ask, snap.yes_best_bid
+            );
+            println!(
+                "    NO:  ask={:?}, bid={:?}",
+                snap.no_best_ask, snap.no_best_bid
+            );
 
             // Skip markets with empty orderbooks (bid=0, ask=1.0 indicates no real data)
             let is_empty_book = matches!(
@@ -507,11 +526,17 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
                 println!("  Live YES: ask={:?}, bid={:?}", live_yes_ask, live_yes_bid);
 
                 if !prices_match(snap.yes_best_ask, live_yes_ask) {
-                    println!("    ⚠️  YES ASK mismatch: DB {:?} vs Live {:?}", snap.yes_best_ask, live_yes_ask);
+                    println!(
+                        "    ⚠️  YES ASK mismatch: DB {:?} vs Live {:?}",
+                        snap.yes_best_ask, live_yes_ask
+                    );
                     api_mismatch_count += 1;
                 }
                 if !prices_match(snap.yes_best_bid, live_yes_bid) {
-                    println!("    ⚠️  YES BID mismatch: DB {:?} vs Live {:?}", snap.yes_best_bid, live_yes_bid);
+                    println!(
+                        "    ⚠️  YES BID mismatch: DB {:?} vs Live {:?}",
+                        snap.yes_best_bid, live_yes_bid
+                    );
                 }
             } else {
                 println!("  ⚠️  Failed to fetch YES book: {:?}", yes_book.err());
@@ -523,19 +548,27 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
                 println!("  Live NO:  ask={:?}, bid={:?}", live_no_ask, live_no_bid);
 
                 if !prices_match(snap.no_best_ask, live_no_ask) {
-                    println!("    ⚠️  NO ASK mismatch: DB {:?} vs Live {:?}", snap.no_best_ask, live_no_ask);
+                    println!(
+                        "    ⚠️  NO ASK mismatch: DB {:?} vs Live {:?}",
+                        snap.no_best_ask, live_no_ask
+                    );
                     api_mismatch_count += 1;
                 }
                 if !prices_match(snap.no_best_bid, live_no_bid) {
-                    println!("    ⚠️  NO BID mismatch: DB {:?} vs Live {:?}", snap.no_best_bid, live_no_bid);
+                    println!(
+                        "    ⚠️  NO BID mismatch: DB {:?} vs Live {:?}",
+                        snap.no_best_bid, live_no_bid
+                    );
                 }
             } else {
                 println!("  ⚠️  Failed to fetch NO book: {:?}", no_book.err());
             }
 
             // Step 4: DB consistency check (scalar vs depth)
-            let (yes_depth_ask, yes_depth_bid) = extract_best_from_depth(&snap.yes_asks, &snap.yes_bids);
-            let (no_depth_ask, no_depth_bid) = extract_best_from_depth(&snap.no_asks, &snap.no_bids);
+            let (yes_depth_ask, yes_depth_bid) =
+                extract_best_from_depth(&snap.yes_asks, &snap.yes_bids);
+            let (no_depth_ask, no_depth_bid) =
+                extract_best_from_depth(&snap.no_asks, &snap.no_bids);
 
             let yes_ask_match = prices_match(snap.yes_best_ask, yes_depth_ask);
             let yes_bid_match = prices_match(snap.yes_best_bid, yes_depth_bid);
@@ -544,8 +577,10 @@ async fn run_audit_prices(args: &Args) -> Result<()> {
 
             if !yes_ask_match || !yes_bid_match || !no_ask_match || !no_bid_match {
                 println!("\n  ❌ DB CONSISTENCY ERROR: scalar != depth");
-                println!("    Depth-derived: YES ask={:?} bid={:?}, NO ask={:?} bid={:?}",
-                    yes_depth_ask, yes_depth_bid, no_depth_ask, no_depth_bid);
+                println!(
+                    "    Depth-derived: YES ask={:?} bid={:?}, NO ask={:?} bid={:?}",
+                    yes_depth_ask, yes_depth_bid, no_depth_ask, no_depth_bid
+                );
                 db_consistency_errors += 1;
             } else {
                 println!("\n  ✅ DB consistency OK (scalar matches depth)");
@@ -590,7 +625,10 @@ fn extract_best_from_depth(
                     level.get("price").and_then(|p| {
                         p.as_str()
                             .and_then(|s| s.parse::<Decimal>().ok())
-                            .or_else(|| p.as_f64().map(|f| Decimal::from_f64_retain(f).unwrap_or_default()))
+                            .or_else(|| {
+                                p.as_f64()
+                                    .map(|f| Decimal::from_f64_retain(f).unwrap_or_default())
+                            })
                     })
                 })
                 .min()
@@ -604,7 +642,10 @@ fn extract_best_from_depth(
                     level.get("price").and_then(|p| {
                         p.as_str()
                             .and_then(|s| s.parse::<Decimal>().ok())
-                            .or_else(|| p.as_f64().map(|f| Decimal::from_f64_retain(f).unwrap_or_default()))
+                            .or_else(|| {
+                                p.as_f64()
+                                    .map(|f| Decimal::from_f64_retain(f).unwrap_or_default())
+                            })
                     })
                 })
                 .max()
@@ -624,10 +665,7 @@ fn prices_match(a: Option<Decimal>, b: Option<Decimal>) -> bool {
 }
 
 /// Fetch orderbook from CLOB REST API.
-async fn fetch_clob_book(
-    http_client: &reqwest::Client,
-    token_id: &str,
-) -> Result<ClobBook> {
+async fn fetch_clob_book(http_client: &reqwest::Client, token_id: &str) -> Result<ClobBook> {
     let url = format!("{}/book?token_id={}", CLOB_HOST, token_id);
     let resp = http_client
         .get(&url)

@@ -8,6 +8,7 @@ members = [
     "src/poly-check",
     "src/expiry-scalper",
     "src/momentum-trader",
+    "src/misprice-trader",
 ]
 
 [workspace.package]

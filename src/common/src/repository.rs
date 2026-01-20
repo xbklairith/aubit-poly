@@ -285,6 +285,7 @@ pub async fn get_active_markets_expiring_within(
 /// Get priority markets using hybrid strategy:
 /// - Crypto markets (BTC, ETH, SOL, XRP) expiring within crypto_hours
 /// - Event markets (all other assets) expiring within event_days
+///
 /// This enables monitoring short-term crypto markets alongside longer-dated event markets.
 pub async fn get_priority_markets_hybrid(
     pool: &PgPool,
@@ -385,6 +386,7 @@ pub async fn count_markets_by_type(pool: &PgPool) -> Result<Vec<(String, i64)>, 
 
 /// Upsert an orderbook snapshot into the database.
 /// Uses ON CONFLICT to update existing snapshot for the market, keeping the DB clean.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_orderbook_snapshot(
     pool: &PgPool,
     market_id: Uuid,
@@ -921,6 +923,7 @@ pub async fn record_trade(
 }
 
 /// Record a trade execution with order tracking (Polymarket order ID and fill amount).
+#[allow(clippy::too_many_arguments)]
 pub async fn record_trade_with_order(
     pool: &PgPool,
     position_id: Uuid,
