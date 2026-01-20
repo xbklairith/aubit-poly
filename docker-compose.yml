@@ -164,7 +164,7 @@ services:
     container_name: position-redeemer
     env_file:
       - .env
-    command: ["sh", "-c", "while true; do echo '=== Checking for redeemable positions ===' && uv run python redeem.py --all --execute 2>&1 || true; echo '--- Sleeping 15m ---'; sleep 900; done"]
+    command: ["sh", "-c", "while true; do echo '=== Checking for redeemable positions ===' && uv run python redeem.py --all --execute 2>&1 || true; echo '--- Sleeping 5m ---'; sleep 300; done"]
     restart: unless-stopped
     networks:
       - aubit-net
