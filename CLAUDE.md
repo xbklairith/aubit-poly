@@ -44,15 +44,17 @@ cargo build --release -p poly-check
 # Database (required first)
 docker compose -f docker-compose-db.yml up -d
 
-# All services via PM2
-pm2 start ecosystem.config.js
-pm2 logs                         # View logs
-pm2 monit                        # Real-time monitoring
+# All services via Docker Compose
+docker compose up -d             # Start all services
+docker compose logs -f           # View logs
+docker compose ps                # Check status
 
-# Individual Rust services
-./target/release/market-scanner --interval 60
-./target/release/orderbook-stream --hybrid --crypto-hours 12
-./target/release/trade-executor --dry-run --interval-ms 1000
+# Individual services
+docker compose up -d momentum-trader
+docker compose logs -f momentum-trader
+
+# Rebuild after code changes
+docker compose build && docker compose up -d
 ```
 
 ## Architecture
@@ -76,7 +78,7 @@ pm2 monit                        # Real-time monitoring
 ├── docx/                        # Structured documentation
 │   ├── core/                    # Product, tech stack, codebase guide
 │   └── features/                # Feature specs (EARS requirements, TDD tasks)
-└── ecosystem.config.js          # PM2 service configuration
+└── docker-compose.yml           # Service orchestration
 ```
 
 ## Key Patterns

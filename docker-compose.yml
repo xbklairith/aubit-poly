@@ -122,7 +122,6 @@ services:
       --min-expiry-minutes 1
       --cooldown-secs 900
       --assets BTC,ETH,SOL,XRP
-      --dry-run
     restart: unless-stopped
     networks:
       - aubit-net
