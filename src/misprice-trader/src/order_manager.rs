@@ -29,6 +29,7 @@ pub enum OrderStatus {
 
 /// A pending order being tracked.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PendingOrder {
     pub order_id: String,
     pub market_id: Uuid,
@@ -37,17 +38,27 @@ pub struct PendingOrder {
     pub placed_at: DateTime<Utc>,
     pub cancel_timeout_secs: u64,
     pub status: OrderStatus,
+    // Fields for exit manager tracking (live trading)
+    pub token_id: Option<String>,
+    pub shares: Option<rust_decimal::Decimal>,
+    pub price: Option<rust_decimal::Decimal>,
 }
 
 /// Result of a cancel attempt, sent back from the spawned task.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CancelResult {
     pub order_id: String,
     pub market_id: Uuid,
+    pub market_name: String,
     pub side: String,
     pub success: bool,
     pub was_filled: bool,
     pub error_msg: Option<String>,
+    // Market info for exit manager (live trading)
+    pub token_id: Option<String>,
+    pub shares: Option<rust_decimal::Decimal>,
+    pub price: Option<rust_decimal::Decimal>,
 }
 
 /// Manages pending orders and their auto-cancel tasks.
@@ -76,12 +87,30 @@ impl OrderManager {
     /// Track a new order and schedule its auto-cancel.
     ///
     /// Returns true if order was added, false if order_id already exists.
+    #[allow(dead_code)]
     pub fn track_order(
         &mut self,
         order_id: String,
         market_id: Uuid,
         market_name: String,
         side: String,
+    ) -> bool {
+        self.track_order_with_market_info(order_id, market_id, market_name, side, None, None, None)
+    }
+
+    /// Track a new order with market info for exit manager.
+    ///
+    /// Returns true if order was added, false if order_id already exists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn track_order_with_market_info(
+        &mut self,
+        order_id: String,
+        market_id: Uuid,
+        market_name: String,
+        side: String,
+        token_id: Option<String>,
+        shares: Option<rust_decimal::Decimal>,
+        price: Option<rust_decimal::Decimal>,
     ) -> bool {
         if self.pending_orders.contains_key(&order_id) {
             warn!(
@@ -99,6 +128,9 @@ impl OrderManager {
             placed_at: Utc::now(),
             cancel_timeout_secs: self.cancel_timeout_secs,
             status: OrderStatus::Pending,
+            token_id: token_id.clone(),
+            shares,
+            price,
         };
 
         self.pending_orders.insert(order_id.clone(), order);
@@ -106,8 +138,12 @@ impl OrderManager {
         // Spawn the cancel task
         let oid = order_id.clone();
         let mid = market_id;
+        let mname = market_name.clone();
         let s = side.clone();
         let timeout = self.cancel_timeout_secs;
+        let tid = token_id;
+        let sh = shares;
+        let pr = price;
 
         self.cancel_tasks.spawn(async move {
             tokio::time::sleep(Duration::from_secs(timeout)).await;
@@ -121,10 +157,14 @@ impl OrderManager {
                     CancelResult {
                         order_id: oid,
                         market_id: mid,
+                        market_name: mname,
                         side: s,
                         success: true,
                         was_filled: false,
                         error_msg: None,
+                        token_id: tid,
+                        shares: sh,
+                        price: pr,
                     }
                 }
                 Err(e) => {
@@ -148,10 +188,14 @@ impl OrderManager {
                     CancelResult {
                         order_id: oid,
                         market_id: mid,
+                        market_name: mname,
                         side: s,
                         success: false,
                         was_filled,
                         error_msg: Some(e.to_string()),
+                        token_id: tid,
+                        shares: sh,
+                        price: pr,
                     }
                 }
             }
@@ -165,8 +209,8 @@ impl OrderManager {
     }
 
     /// Poll for completed cancel tasks and update order statuses.
-    /// Returns list of (market_id, side, was_filled) for orders that completed.
-    pub fn poll_completed(&mut self) -> Vec<(Uuid, String, bool)> {
+    /// Returns list of CancelResult for orders that completed.
+    pub fn poll_completed(&mut self) -> Vec<CancelResult> {
         let mut completed = Vec::new();
 
         // Non-blocking poll for completed tasks
@@ -184,14 +228,10 @@ impl OrderManager {
                         };
                     }
 
-                    completed.push((
-                        cancel_result.market_id,
-                        cancel_result.side,
-                        cancel_result.was_filled,
-                    ));
-
                     // Remove from pending
                     self.pending_orders.remove(&cancel_result.order_id);
+
+                    completed.push(cancel_result);
                 }
                 Err(e) => {
                     error!("[ORDER] Cancel task panicked: {}", e);
@@ -210,6 +250,7 @@ impl OrderManager {
     }
 
     /// Get count of pending orders.
+    #[allow(dead_code)]
     pub fn pending_count(&self) -> usize {
         self.pending_orders.len()
     }

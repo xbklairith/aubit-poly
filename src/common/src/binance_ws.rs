@@ -650,10 +650,7 @@ impl KlineBuffer {
 
     /// Get the time range covered by the buffer for a symbol.
     /// Returns (oldest_open_time, newest_close_time) or None if buffer is empty.
-    pub fn get_buffer_time_range(
-        &self,
-        symbol: &str,
-    ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    pub fn get_buffer_time_range(&self, symbol: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
         let buffer = self.buffers.get(symbol)?;
         let oldest = buffer.front()?;
         let newest = buffer.back()?;

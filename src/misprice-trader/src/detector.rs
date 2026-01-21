@@ -272,7 +272,10 @@ mod tests {
 
         // Single reading above open should NOT trigger flip (debouncing)
         let result = detector.update_and_check_flip(&market_id, dec!(101));
-        assert!(result.is_none(), "Single UP reading should not trigger flip");
+        assert!(
+            result.is_none(),
+            "Single UP reading should not trigger flip"
+        );
 
         // Second reading above open still shouldn't flip (need DEBOUNCE_COUNT)
         let result = detector.update_and_check_flip(&market_id, dec!(102));

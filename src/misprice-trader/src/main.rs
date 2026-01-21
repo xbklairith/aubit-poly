@@ -28,10 +28,12 @@ use common::{
 };
 
 mod detector;
+mod exit_manager;
 mod metrics;
 mod order_manager;
 
 use detector::MispriceDetector;
+use exit_manager::ExitManager;
 use metrics::Metrics;
 use order_manager::OrderManager;
 
@@ -71,6 +73,14 @@ struct Args {
     /// Auto-cancel timeout for limit orders (seconds)
     #[arg(long, default_value = "10")]
     cancel_timeout: u64,
+
+    /// Trailing stop percentage (exit when price drops this much from peak). 0 to disable.
+    #[arg(long, default_value = "0")]
+    trailing_stop_pct: f64,
+
+    /// Take profit percentage (exit immediately when profit exceeds this). Optional.
+    #[arg(long)]
+    take_profit_pct: Option<f64>,
 }
 
 /// Map of asset -> Binance symbol. Returns None for unsupported assets.
@@ -98,6 +108,22 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Validate percentage arguments
+    if !(0.0..=1.0).contains(&args.trailing_stop_pct) {
+        anyhow::bail!(
+            "--trailing-stop-pct must be between 0.0 and 1.0 (got {})",
+            args.trailing_stop_pct
+        );
+    }
+    if let Some(tp) = args.take_profit_pct {
+        if !(0.0..=10.0).contains(&tp) {
+            anyhow::bail!(
+                "--take-profit-pct must be between 0.0 and 10.0 (got {})",
+                tp
+            );
+        }
+    }
+
     info!("=== Misprice Trader ===");
     info!("Limit price: ${}", args.limit_price);
     info!("Position size: ${}", args.position_size);
@@ -108,6 +134,12 @@ async fn main() -> Result<()> {
     info!("Max orderbook age: {}s", args.max_orderbook_age);
     info!("Assets: {}", args.assets);
     info!("Cancel timeout: {}s", args.cancel_timeout);
+    if args.trailing_stop_pct > 0.0 {
+        info!("Trailing stop: {:.1}%", args.trailing_stop_pct * 100.0);
+        if let Some(tp) = args.take_profit_pct {
+            info!("Take profit: {:.1}%", tp * 100.0);
+        }
+    }
     info!("Dry run: {}", args.dry_run);
 
     // Load config and connect to database
@@ -157,6 +189,12 @@ async fn main() -> Result<()> {
     let mut traded_positions: HashSet<(Uuid, String)> = HashSet::new();
     // Order manager for tracking pending orders and auto-cancel (live trading only)
     let mut order_manager = OrderManager::new(args.cancel_timeout);
+    // Exit manager for trailing stop and take profit exits
+    let trailing_stop_pct = Decimal::try_from(args.trailing_stop_pct).unwrap_or(dec!(0));
+    let take_profit_pct = args
+        .take_profit_pct
+        .map(|tp| Decimal::try_from(tp).unwrap_or(dec!(0)));
+    let mut exit_manager = ExitManager::new(trailing_stop_pct, take_profit_pct, args.dry_run);
 
     // Connect to Binance WebSocket (Both = bookTicker for real-time + klines for history)
     let binance_client =
@@ -183,10 +221,13 @@ async fn main() -> Result<()> {
             }
             _ = heartbeat_interval.tick() => {
                 // Heartbeat: print metrics and portfolio summary
-                info!("[ALIVE] Heartbeat - klines received: {}, markets tracked: {}",
-                    klines_since_heartbeat, detector.tracked_count());
+                info!("[ALIVE] Heartbeat - klines received: {}, markets tracked: {}, active positions: {}",
+                    klines_since_heartbeat, detector.tracked_count(), exit_manager.position_count());
                 klines_since_heartbeat = 0;
                 metrics.print_summary();
+                if exit_manager.is_enabled() {
+                    exit_manager.print_summary();
+                }
                 if args.dry_run {
                     portfolio.print_summary();
                     // Resolve expired positions during heartbeat
@@ -224,6 +265,7 @@ async fn main() -> Result<()> {
                                 &mut cached_auth,
                                 &mut traded_positions,
                                 &mut order_manager,
+                                &mut exit_manager,
                                 limit_price,
                                 position_size,
                             ).await;
@@ -244,6 +286,11 @@ async fn main() -> Result<()> {
                             ).await {
                                 let active_ids: Vec<Uuid> = markets.iter().map(|m| m.id).collect();
                                 detector.cleanup_expired(&active_ids);
+
+                                // Also cleanup expired positions in exit manager
+                                if exit_manager.is_enabled() {
+                                    exit_manager.cleanup_expired_positions(&active_ids);
+                                }
                             }
                         }
                     }
@@ -295,24 +342,46 @@ async fn run_cycle(
     cached_auth: &mut Option<CachedAuth>,
     traded_positions: &mut HashSet<(Uuid, String)>,
     order_manager: &mut OrderManager,
+    exit_manager: &mut ExitManager,
     limit_price: Decimal,
     position_size: Decimal,
 ) {
     // Poll for completed cancel tasks and process results
-    for (market_id, side, was_filled) in order_manager.poll_completed() {
-        if was_filled {
+    for result in order_manager.poll_completed() {
+        if result.was_filled {
             info!(
                 "[VERIFIED] Order for market {} {} was filled",
-                market_id, side
+                result.market_id, result.side
             );
             metrics.record_verified_fill();
+
+            // Add to exit manager for trailing stop tracking (live mode)
+            if exit_manager.is_enabled() && !args.dry_run {
+                if let (Some(token_id), Some(shares), Some(price)) =
+                    (&result.token_id, result.shares, result.price)
+                {
+                    exit_manager.add_position(
+                        result.market_id,
+                        result.market_name.clone(),
+                        token_id.clone(),
+                        result.side.clone(),
+                        shares,
+                        price,
+                    );
+                } else {
+                    warn!(
+                        "[EXIT_MGR] Missing market info for filled order {} {}, cannot track",
+                        result.market_id, result.side
+                    );
+                }
+            }
         } else {
             // Order was cancelled, remove from traded_positions to allow retry
             debug!(
                 "[CANCELLED] Order for market {} {} was cancelled, allowing retry",
-                market_id, side
+                result.market_id, result.side
             );
-            traded_positions.remove(&(market_id, side));
+            traded_positions.remove(&(result.market_id, result.side.clone()));
         }
     }
 
@@ -351,6 +420,17 @@ async fn run_cycle(
     }
 
     debug!("Found {} tradeable markets", markets.len());
+
+    // Check for trailing stop/take profit exits
+    if exit_manager.is_enabled() && exit_manager.position_count() > 0 {
+        let exits = exit_manager.check_exits(&markets, cached_auth).await;
+        for exit in exits {
+            metrics.record_exit(&exit);
+            if args.dry_run && exit.success {
+                portfolio.close_position(exit.market_id, exit.exit_price, exit.pnl);
+            }
+        }
+    }
 
     // Process each market
     for market in &markets {
@@ -495,6 +575,23 @@ async fn run_cycle(
                     last_retry_time: None,
                 });
 
+                // Also add to exit manager for trailing stop tracking
+                if exit_manager.is_enabled() {
+                    let token_id_for_exit = match side {
+                        "YES" => &market.yes_token_id,
+                        "NO" => &market.no_token_id,
+                        _ => token_id,
+                    };
+                    exit_manager.add_position(
+                        market.id,
+                        market.name.clone(),
+                        token_id_for_exit.clone(),
+                        side.to_string(),
+                        shares,
+                        effective_price, // Use effective fill price as entry
+                    );
+                }
+
                 traded_positions.insert((market.id, side.to_string()));
                 detector.mark_traded(&market.id);
                 metrics.record_trade(&market.asset, side);
@@ -530,12 +627,15 @@ async fn run_cycle(
                         detector.mark_traded(&market.id);
                         metrics.record_trade(&market.asset, side);
 
-                        // Track order with managed auto-cancel
-                        order_manager.track_order(
+                        // Track order with market info for exit manager
+                        order_manager.track_order_with_market_info(
                             order_id,
                             market.id,
                             market.name.clone(),
                             side.to_string(),
+                            Some(token_id.clone()),
+                            Some(shares),
+                            Some(limit_price),
                         );
                     }
                     Err(e) => {

@@ -280,6 +280,38 @@ impl DryRunPortfolio {
         }
     }
 
+    /// Close a position early (via trailing stop or take profit exit).
+    /// Removes from positions list and updates P&L.
+    pub fn close_position(&mut self, market_id: Uuid, exit_price: Decimal, pnl: Decimal) {
+        // Find and remove the position
+        if let Some(pos_idx) = self.positions.iter().position(|p| p.market_id == market_id) {
+            let pos = self.positions.remove(pos_idx);
+            self.pending_count = self.pending_count.saturating_sub(1);
+            self.total_pnl += pnl;
+
+            if pnl >= Decimal::ZERO {
+                self.realized_wins += 1;
+                info!(
+                    "[PORTFOLIO] ✅ CLOSED (profit): {} {} @ ${:.3} -> +${:.2}",
+                    pos.side, pos.market_name, exit_price, pnl
+                );
+            } else {
+                self.realized_losses += 1;
+                info!(
+                    "[PORTFOLIO] ❌ CLOSED (loss): {} {} @ ${:.3} -> ${:.2}",
+                    pos.side, pos.market_name, exit_price, pnl
+                );
+            }
+        } else {
+            warn!("[PORTFOLIO] Position {} not found for close", market_id);
+        }
+    }
+
+    /// Get a position by market_id for exit manager.
+    pub fn get_position(&self, market_id: &Uuid) -> Option<&SimulatedPosition> {
+        self.positions.iter().find(|p| p.market_id == *market_id)
+    }
+
     /// Cleanup stale positions that are too old (over 1 hour past expiry).
     /// These are positions that failed resolution and should be force-expired.
     pub fn cleanup_stale_positions(&mut self) {
@@ -482,6 +514,82 @@ pub async fn execute_trade(
             Err(anyhow::anyhow!("Order rejected: {}", error))
         } else {
             Err(anyhow::anyhow!("Order failed with unknown error"))
+        }
+    } else {
+        Err(anyhow::anyhow!("No order response received"))
+    }
+}
+
+/// Execute a sell order on Polymarket. Returns the order ID on success.
+pub async fn execute_sell_order(
+    cached_auth: &mut Option<CachedAuth>,
+    token_id: &str,
+    shares: Decimal,
+    price: Decimal,
+    market_name: &str,
+) -> Result<String> {
+    // Ensure authenticated
+    let auth = ensure_authenticated(cached_auth).await?;
+
+    // Normalize price and shares to remove trailing zeros
+    let price = price.normalize();
+    let shares = shares.round_dp(2);
+
+    // Build sell order
+    info!(
+        "[TRADE] Building SELL order: {} shares @ ${}",
+        shares, price
+    );
+
+    let order = timeout(
+        Duration::from_secs(ORDER_TIMEOUT_SECS),
+        auth.client
+            .limit_order()
+            .token_id(token_id)
+            .size(shares)
+            .price(price)
+            .side(polymarket_client_sdk::clob::types::Side::Sell)
+            .build(),
+    )
+    .await
+    .context("Order building timed out")?
+    .context("Failed to build order")?;
+
+    // Sign order
+    let signed = timeout(
+        Duration::from_secs(ORDER_TIMEOUT_SECS),
+        auth.client.sign(&auth.signer, order),
+    )
+    .await
+    .context("Order signing timed out")?
+    .context("Failed to sign order")?;
+
+    // Post order
+    let result = timeout(
+        Duration::from_secs(ORDER_TIMEOUT_SECS),
+        auth.client.post_order(signed),
+    )
+    .await
+    .context("Order posting timed out")?
+    .context("Failed to post order")?;
+
+    // Check result
+    if let Some(order) = result.first() {
+        let has_error = order
+            .error_msg
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        if !order.order_id.is_empty() && !has_error {
+            info!(
+                "[TRADE] Sell order placed successfully: {} (order_id: {})",
+                market_name, order.order_id
+            );
+            Ok(order.order_id.clone())
+        } else if let Some(ref error) = order.error_msg {
+            Err(anyhow::anyhow!("Sell order rejected: {}", error))
+        } else {
+            Err(anyhow::anyhow!("Sell order failed with unknown error"))
         }
     } else {
         Err(anyhow::anyhow!("No order response received"))

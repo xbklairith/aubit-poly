@@ -25,8 +25,8 @@ pub use clob::{BookMessage, ClobClient, ClobMessage, PriceChange, PriceChangeMes
 pub use config::Config;
 pub use db::Database;
 pub use executor::{
-    cancel_order, cancel_order_standalone, ensure_authenticated, execute_trade, CachedAuth,
-    DryRunPortfolio, SimulatedPosition, MAX_SHARES,
+    cancel_order, cancel_order_standalone, ensure_authenticated, execute_sell_order, execute_trade,
+    CachedAuth, DryRunPortfolio, SimulatedPosition, MAX_SHARES,
 };
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{
