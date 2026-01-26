@@ -54,7 +54,7 @@ pub struct MarketWithOrderbook {
 }
 
 /// A price level in the orderbook.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrderbookLevel {
     pub price: Decimal,
     pub size: Decimal,
@@ -157,7 +157,8 @@ pub fn calculate_fill_price_with_slippage(
 }
 
 /// Upsert a market into the database.
-/// Updates existing market if condition_id matches, otherwise inserts new.
+/// Updates existing market if (platform, condition_id) matches, otherwise inserts new.
+/// Default platform is 'polymarket' for backwards compatibility.
 pub async fn upsert_market(pool: &PgPool, market: &ParsedMarket) -> Result<Uuid, sqlx::Error> {
     let market_type_str = match market.market_type {
         MarketType::UpDown => "up_down",
@@ -168,9 +169,9 @@ pub async fn upsert_market(pool: &PgPool, market: &ParsedMarket) -> Result<Uuid,
 
     let result = sqlx::query_scalar!(
         r#"
-        INSERT INTO markets (condition_id, market_type, asset, timeframe, yes_token_id, no_token_id, name, end_time, is_active)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
-        ON CONFLICT (condition_id) DO UPDATE SET
+        INSERT INTO markets (platform, condition_id, market_type, asset, timeframe, yes_token_id, no_token_id, name, end_time, is_active)
+        VALUES ('polymarket', $1, $2, $3, $4, $5, $6, $7, $8, true)
+        ON CONFLICT (platform, condition_id) DO UPDATE SET
             market_type = EXCLUDED.market_type,
             asset = EXCLUDED.asset,
             timeframe = EXCLUDED.timeframe,
@@ -1137,6 +1138,583 @@ pub async fn get_market_resolutions_batch(
     .await?;
 
     Ok(results)
+}
+
+// =============================================================================
+// KALSHI AND CROSS-PLATFORM FUNCTIONS
+// =============================================================================
+
+use crate::kalshi::ParsedKalshiMarket;
+use crate::limitless::ParsedLimitlessMarket;
+
+/// Kalshi market for database insertion.
+#[derive(Debug, Clone)]
+pub struct KalshiMarketInsert {
+    pub ticker: String,
+    pub name: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub end_time: DateTime<Utc>,
+    pub yes_best_bid: Option<Decimal>,
+    pub yes_best_ask: Option<Decimal>,
+    pub no_best_bid: Option<Decimal>,
+    pub no_best_ask: Option<Decimal>,
+    pub liquidity: Option<Decimal>,
+    pub rules_primary: Option<String>,
+    pub strike_price: Option<f64>,
+    pub direction: Option<String>,
+}
+
+impl From<&ParsedKalshiMarket> for KalshiMarketInsert {
+    fn from(m: &ParsedKalshiMarket) -> Self {
+        Self {
+            ticker: m.ticker.clone(),
+            name: m.name.clone(),
+            asset: m.asset.clone(),
+            timeframe: m.timeframe.clone(),
+            end_time: m.close_time,
+            yes_best_bid: m.yes_best_bid,
+            yes_best_ask: m.yes_best_ask,
+            no_best_bid: m.no_best_bid,
+            no_best_ask: m.no_best_ask,
+            liquidity: m.liquidity,
+            rules_primary: m.rules_primary.clone(),
+            strike_price: m.strike_price,
+            direction: m.direction.clone(),
+        }
+    }
+}
+
+/// Upsert a Kalshi market into the database.
+/// Uses platform + condition_id (ticker for Kalshi) as unique key.
+pub async fn upsert_kalshi_market(
+    pool: &PgPool,
+    market: &KalshiMarketInsert,
+) -> Result<Uuid, sqlx::Error> {
+    // Determine market type from direction
+    let market_type = match market.direction.as_deref() {
+        Some("above") | Some("below") => "above",
+        _ => "unknown",
+    };
+
+    let result = sqlx::query_scalar!(
+        r#"
+        INSERT INTO markets (
+            platform, condition_id, market_type, asset, timeframe,
+            yes_token_id, no_token_id, name, end_time,
+            rules_primary, liquidity_dollars, strike_price, direction,
+            is_active
+        )
+        VALUES (
+            'kalshi', $1, $2, $3, $4,
+            $1, $1, $5, $6,
+            $7, $8, $9, $10,
+            true
+        )
+        ON CONFLICT (platform, condition_id) DO UPDATE SET
+            market_type = EXCLUDED.market_type,
+            asset = EXCLUDED.asset,
+            timeframe = EXCLUDED.timeframe,
+            name = EXCLUDED.name,
+            end_time = EXCLUDED.end_time,
+            rules_primary = EXCLUDED.rules_primary,
+            liquidity_dollars = EXCLUDED.liquidity_dollars,
+            strike_price = EXCLUDED.strike_price,
+            direction = EXCLUDED.direction,
+            is_active = true,
+            updated_at = NOW()
+        RETURNING id
+        "#,
+        market.ticker,
+        market_type,
+        market.asset,
+        market.timeframe,
+        market.name,
+        market.end_time,
+        market.rules_primary,
+        market.liquidity,
+        market.strike_price,
+        market.direction,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Market with platform info for cross-platform queries.
+#[derive(Debug, Clone)]
+pub struct MarketWithPlatform {
+    pub id: Uuid,
+    pub platform: String,
+    pub condition_id: String,
+    pub market_type: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub name: String,
+    pub end_time: DateTime<Utc>,
+    pub is_active: bool,
+    pub direction: Option<String>,
+    pub strike_price: Option<f64>,
+    pub liquidity_dollars: Option<Decimal>,
+    // Orderbook prices (if joined)
+    pub yes_best_ask: Option<Decimal>,
+    pub yes_best_bid: Option<Decimal>,
+    pub no_best_ask: Option<Decimal>,
+    pub no_best_bid: Option<Decimal>,
+    pub captured_at: Option<DateTime<Utc>>,
+}
+
+/// Get active markets for a specific platform.
+pub async fn get_markets_by_platform(
+    pool: &PgPool,
+    platform: &str,
+) -> Result<Vec<MarketWithPlatform>, sqlx::Error> {
+    let markets = sqlx::query_as!(
+        MarketWithPlatform,
+        r#"
+        SELECT
+            m.id,
+            COALESCE(m.platform, 'polymarket') as "platform!",
+            m.condition_id,
+            m.market_type,
+            m.asset,
+            m.timeframe,
+            m.yes_token_id,
+            m.no_token_id,
+            m.name,
+            m.end_time,
+            COALESCE(m.is_active, true) as "is_active!",
+            m.direction,
+            m.strike_price,
+            m.liquidity_dollars,
+            NULL::DECIMAL as yes_best_ask,
+            NULL::DECIMAL as yes_best_bid,
+            NULL::DECIMAL as no_best_ask,
+            NULL::DECIMAL as no_best_bid,
+            NULL::TIMESTAMPTZ as captured_at
+        FROM markets m
+        WHERE COALESCE(m.platform, 'polymarket') = $1
+          AND m.is_active = true
+          AND m.end_time > NOW()
+        ORDER BY m.end_time ASC
+        "#,
+        platform
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(markets)
+}
+
+/// Get active markets for a platform with fresh orderbook prices.
+pub async fn get_platform_markets_with_prices(
+    pool: &PgPool,
+    platform: &str,
+    max_age_seconds: i32,
+    assets: &[String],
+    max_expiry_seconds: i64,
+) -> Result<Vec<MarketWithPlatform>, sqlx::Error> {
+    let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
+    let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+
+    let results = sqlx::query_as!(
+        MarketWithPlatform,
+        r#"
+        SELECT
+            m.id,
+            COALESCE(m.platform, 'polymarket') as "platform!",
+            m.condition_id,
+            m.market_type,
+            m.asset,
+            m.timeframe,
+            m.yes_token_id,
+            m.no_token_id,
+            m.name,
+            m.end_time,
+            COALESCE(m.is_active, true) as "is_active!",
+            m.direction,
+            m.strike_price,
+            m.liquidity_dollars,
+            o.yes_best_ask,
+            o.yes_best_bid,
+            o.no_best_ask,
+            o.no_best_bid,
+            o.captured_at
+        FROM markets m
+        INNER JOIN (
+            SELECT DISTINCT ON (market_id)
+                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at
+            FROM orderbook_snapshots
+            WHERE captured_at > $1
+            ORDER BY market_id, captured_at DESC
+        ) o ON o.market_id = m.id
+        WHERE COALESCE(m.platform, 'polymarket') = $2
+          AND m.is_active = true
+          AND m.asset = ANY($3)
+          AND m.end_time > NOW()
+          AND m.end_time <= $4
+        ORDER BY m.end_time ASC
+        "#,
+        snapshot_cutoff,
+        platform,
+        assets,
+        expiry_cutoff,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results)
+}
+
+/// Update orderbook prices for a Kalshi market.
+/// Kalshi doesn't have WebSocket, so we update via REST polling.
+pub async fn update_kalshi_prices(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_best_ask: Option<Decimal>,
+    yes_best_bid: Option<Decimal>,
+    no_best_ask: Option<Decimal>,
+    no_best_bid: Option<Decimal>,
+) -> Result<(), sqlx::Error> {
+    let now = Utc::now();
+
+    sqlx::query!(
+        r#"
+        INSERT INTO orderbook_snapshots (
+            market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid,
+            captured_at, yes_updated_at, no_updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $6, $6)
+        ON CONFLICT (market_id) DO UPDATE SET
+            yes_best_ask = $2,
+            yes_best_bid = $3,
+            no_best_ask = $4,
+            no_best_bid = $5,
+            captured_at = $6,
+            yes_updated_at = $6,
+            no_updated_at = $6
+        "#,
+        market_id,
+        yes_best_ask,
+        yes_best_bid,
+        no_best_ask,
+        no_best_bid,
+        now,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Update Polymarket market prices in orderbook_snapshots.
+/// This is an alias for update_kalshi_prices since they use the same schema.
+pub async fn update_polymarket_prices(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_best_ask: Option<Decimal>,
+    yes_best_bid: Option<Decimal>,
+    no_best_ask: Option<Decimal>,
+    no_best_bid: Option<Decimal>,
+) -> Result<(), sqlx::Error> {
+    update_kalshi_prices(pool, market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid).await
+}
+
+// =============================================================================
+// LIMITLESS EXCHANGE FUNCTIONS
+// =============================================================================
+
+/// Limitless market for database insertion.
+#[derive(Debug, Clone)]
+pub struct LimitlessMarketInsert {
+    pub slug: String,
+    pub name: String,
+    pub asset: String,
+    pub timeframe: String,
+    pub end_time: DateTime<Utc>,
+    pub yes_position_id: String,
+    pub no_position_id: String,
+    pub yes_best_bid: Option<Decimal>,
+    pub yes_best_ask: Option<Decimal>,
+    pub no_best_bid: Option<Decimal>,
+    pub no_best_ask: Option<Decimal>,
+    pub liquidity: Option<Decimal>,
+    pub direction: Option<String>,
+    pub exchange_address: Option<String>,
+}
+
+impl From<&ParsedLimitlessMarket> for LimitlessMarketInsert {
+    fn from(m: &ParsedLimitlessMarket) -> Self {
+        Self {
+            slug: m.slug.clone(),
+            name: m.name.clone(),
+            asset: m.asset.clone(),
+            timeframe: m.timeframe.clone(),
+            end_time: m.close_time,
+            yes_position_id: m.yes_position_id.clone(),
+            no_position_id: m.no_position_id.clone(),
+            yes_best_bid: m.yes_best_bid,
+            yes_best_ask: m.yes_best_ask,
+            no_best_bid: m.no_best_bid,
+            no_best_ask: m.no_best_ask,
+            liquidity: m.liquidity,
+            direction: m.direction.clone(),
+            exchange_address: m.exchange_address.clone(),
+        }
+    }
+}
+
+/// Upsert a Limitless market into the database.
+/// Uses platform + condition_id (slug for Limitless) as unique key.
+/// Note: Uses yes_token_id/no_token_id for position IDs (same columns).
+pub async fn upsert_limitless_market(
+    pool: &PgPool,
+    market: &LimitlessMarketInsert,
+) -> Result<Uuid, sqlx::Error> {
+    // Determine market type from direction
+    let market_type = match market.direction.as_deref() {
+        Some("up") | Some("down") => "up_down",
+        Some("above") | Some("below") => "above",
+        _ => "unknown",
+    };
+
+    let result = sqlx::query_scalar!(
+        r#"
+        INSERT INTO markets (
+            platform, condition_id, market_type, asset, timeframe,
+            yes_token_id, no_token_id, name, end_time,
+            liquidity_dollars, direction,
+            is_active
+        )
+        VALUES (
+            'limitless', $1, $2, $3, $4,
+            $5, $6, $7, $8,
+            $9, $10,
+            true
+        )
+        ON CONFLICT (platform, condition_id) DO UPDATE SET
+            market_type = EXCLUDED.market_type,
+            asset = EXCLUDED.asset,
+            timeframe = EXCLUDED.timeframe,
+            yes_token_id = EXCLUDED.yes_token_id,
+            no_token_id = EXCLUDED.no_token_id,
+            name = EXCLUDED.name,
+            end_time = EXCLUDED.end_time,
+            liquidity_dollars = EXCLUDED.liquidity_dollars,
+            direction = EXCLUDED.direction,
+            is_active = true,
+            updated_at = NOW()
+        RETURNING id
+        "#,
+        market.slug,              // $1: condition_id
+        market_type,              // $2: market_type
+        market.asset,             // $3: asset
+        market.timeframe,         // $4: timeframe
+        market.yes_position_id,   // $5: yes_token_id (stores position ID)
+        market.no_position_id,    // $6: no_token_id (stores position ID)
+        market.name,              // $7: name
+        market.end_time,          // $8: end_time
+        market.liquidity,         // $9: liquidity_dollars
+        market.direction,         // $10: direction
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Update orderbook prices for a Limitless market.
+/// Similar to update_kalshi_prices but for Limitless.
+pub async fn update_limitless_prices(
+    pool: &PgPool,
+    market_id: Uuid,
+    yes_best_ask: Option<Decimal>,
+    yes_best_bid: Option<Decimal>,
+    no_best_ask: Option<Decimal>,
+    no_best_bid: Option<Decimal>,
+) -> Result<(), sqlx::Error> {
+    update_kalshi_prices(pool, market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid).await
+}
+
+/// Get Limitless markets with fresh prices for cross-platform matching.
+pub async fn get_limitless_markets_with_prices(
+    pool: &PgPool,
+    max_age_seconds: i32,
+    assets: &[String],
+    max_expiry_seconds: i64,
+) -> Result<Vec<MarketWithPlatform>, sqlx::Error> {
+    get_platform_markets_with_prices(pool, "limitless", max_age_seconds, assets, max_expiry_seconds).await
+}
+
+/// Cross-platform match for caching.
+#[derive(Debug, Clone)]
+pub struct CrossPlatformMatchInsert {
+    pub polymarket_id: Uuid,
+    pub kalshi_id: Uuid,
+    pub match_confidence: Decimal,
+    pub match_reason: Option<String>,
+    pub entity_asset: Option<String>,
+    pub entity_timeframe: Option<String>,
+    pub entity_direction: Option<String>,
+}
+
+/// Insert or update a cross-platform match.
+pub async fn upsert_cross_platform_match(
+    pool: &PgPool,
+    m: &CrossPlatformMatchInsert,
+) -> Result<Uuid, sqlx::Error> {
+    let result = sqlx::query_scalar!(
+        r#"
+        INSERT INTO cross_platform_matches (
+            polymarket_id, kalshi_id, match_confidence, match_reason,
+            entity_asset, entity_timeframe, entity_direction
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (polymarket_id, kalshi_id) DO UPDATE SET
+            match_confidence = EXCLUDED.match_confidence,
+            match_reason = EXCLUDED.match_reason,
+            validated_at = NOW()
+        RETURNING id
+        "#,
+        m.polymarket_id,
+        m.kalshi_id,
+        m.match_confidence,
+        m.match_reason,
+        m.entity_asset,
+        m.entity_timeframe,
+        m.entity_direction,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Get cached cross-platform matches with minimum confidence.
+pub async fn get_cross_platform_matches(
+    pool: &PgPool,
+    min_confidence: Decimal,
+) -> Result<Vec<(Uuid, Uuid, Uuid, Decimal, Option<String>)>, sqlx::Error> {
+    let results = sqlx::query!(
+        r#"
+        SELECT
+            cpm.id,
+            cpm.polymarket_id,
+            cpm.kalshi_id,
+            cpm.match_confidence,
+            cpm.match_reason
+        FROM cross_platform_matches cpm
+        WHERE cpm.match_confidence >= $1
+          AND cpm.invalidated_at IS NULL
+        ORDER BY cpm.match_confidence DESC
+        "#,
+        min_confidence
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results
+        .into_iter()
+        .map(|r| {
+            (
+                r.id,
+                r.polymarket_id,
+                r.kalshi_id,
+                r.match_confidence,
+                r.match_reason,
+            )
+        })
+        .collect())
+}
+
+/// Record a detected cross-platform arbitrage opportunity.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_cross_platform_opportunity(
+    pool: &PgPool,
+    match_id: Uuid,
+    buy_yes_platform: &str,
+    buy_no_platform: &str,
+    yes_price: Decimal,
+    no_price: Decimal,
+    total_cost: Decimal,
+    gross_profit_pct: Decimal,
+    net_profit_pct: Decimal,
+    min_liquidity: Option<Decimal>,
+    expires_at: DateTime<Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let result = sqlx::query_scalar!(
+        r#"
+        INSERT INTO cross_platform_opportunities (
+            match_id, buy_yes_platform, buy_no_platform,
+            yes_price, no_price, total_cost,
+            gross_profit_pct, net_profit_pct,
+            min_liquidity, expires_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        "#,
+        match_id,
+        buy_yes_platform,
+        buy_no_platform,
+        yes_price,
+        no_price,
+        total_cost,
+        gross_profit_pct,
+        net_profit_pct,
+        min_liquidity,
+        expires_at,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Get recent cross-platform opportunities.
+pub async fn get_recent_opportunities(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<(Uuid, Uuid, String, String, Decimal, Decimal, Decimal, DateTime<Utc>)>, sqlx::Error>
+{
+    let results = sqlx::query!(
+        r#"
+        SELECT
+            cpo.id,
+            cpo.match_id,
+            cpo.buy_yes_platform,
+            cpo.buy_no_platform,
+            cpo.total_cost,
+            cpo.gross_profit_pct,
+            cpo.net_profit_pct,
+            cpo.detected_at
+        FROM cross_platform_opportunities cpo
+        WHERE cpo.status = 'detected'
+        ORDER BY cpo.detected_at DESC
+        LIMIT $1
+        "#,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(results
+        .into_iter()
+        .map(|r| {
+            (
+                r.id,
+                r.match_id,
+                r.buy_yes_platform,
+                r.buy_no_platform,
+                r.total_cost,
+                r.gross_profit_pct,
+                r.net_profit_pct,
+                r.detected_at.unwrap_or_else(Utc::now),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]

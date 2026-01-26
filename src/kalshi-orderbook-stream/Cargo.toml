@@ -1,0 +1,24 @@
+[package]
+name = "kalshi-orderbook-stream"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kalshi-orderbook-stream"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+tokio.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dotenvy.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+rust_decimal_macros = "1.36"
+uuid.workspace = true

@@ -1,0 +1,130 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            m.id,\n            COALESCE(m.platform, 'polymarket') as \"platform!\",\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            m.direction,\n            m.strike_price,\n            m.liquidity_dollars,\n            NULL::DECIMAL as yes_best_ask,\n            NULL::DECIMAL as yes_best_bid,\n            NULL::DECIMAL as no_best_ask,\n            NULL::DECIMAL as no_best_bid,\n            NULL::TIMESTAMPTZ as captured_at\n        FROM markets m\n        WHERE COALESCE(m.platform, 'polymarket') = $1\n          AND m.is_active = true\n          AND m.end_time > NOW()\n        ORDER BY m.end_time ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "platform!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "condition_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "market_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "asset",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "timeframe",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "yes_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "no_token_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "end_time",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "direction",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "strike_price",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 13,
+        "name": "liquidity_dollars",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 14,
+        "name": "yes_best_ask",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 15,
+        "name": "yes_best_bid",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 16,
+        "name": "no_best_ask",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 17,
+        "name": "no_best_bid",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 18,
+        "name": "captured_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "69438cd46542d8be2db97839612d3cc0615e903e4e273cbad53d018eadb6bc1e"
+}

@@ -219,6 +219,63 @@ services:
     networks:
       - aubit-net
 
+  cross-platform-arb:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: cross-platform-arb
+    entrypoint: ["cross-platform-arb"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: cross_platform_arb=info,common=warn,sqlx=warn
+    command: >
+      --interval 30
+      --min-profit 3.5
+      --min-profit-15m 1.0
+      --min-liquidity 500
+      --max-orderbook-age 30
+      --max-expiry-secs 7200
+      --min-match-confidence 0.9
+      --assets BTC,ETH,SOL,XRP
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
+  limitless-loader:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    container_name: limitless-loader
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+    command: ["sh", "-c", "while true; do echo '=== Loading Limitless markets ===' && uv run python pylo/tools/load_limitless.py 2>&1 || true; echo '--- Sleeping 30s ---'; sleep 30; done"]
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
+  # kalshi-orderbook-stream:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.trade-executor
+  #   container_name: kalshi-orderbook-stream
+  #   entrypoint: ["kalshi-orderbook-stream"]
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+  #     RUST_LOG: info
+  #   command: >
+  #     --max-expiry-hours 2
+  #     --refresh-interval 300
+  #     --assets BTC,ETH,SOL,XRP
+  #   restart: unless-stopped
+  #   networks:
+  #     - aubit-net
+
 networks:
   aubit-net:
     external: true

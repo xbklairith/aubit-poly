@@ -4,11 +4,13 @@ members = [
     "src/common",
     "src/market-scanner",
     "src/orderbook-stream",
+    "src/kalshi-orderbook-stream",
     "src/trade-executor",
     "src/poly-check",
     "src/expiry-scalper",
     "src/momentum-trader",
     "src/misprice-trader",
+    "src/cross-platform-arb",
 ]
 
 [workspace.package]

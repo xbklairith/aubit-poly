@@ -166,9 +166,14 @@ class KalshiClient(BaseDataSource):
             end_date = None
             if data.get("close_time"):
                 with contextlib.suppress(ValueError, TypeError):
-                    end_date = datetime.fromisoformat(
-                        data["close_time"].replace("Z", "+00:00")
-                    )
+                    end_date = datetime.fromisoformat(data["close_time"].replace("Z", "+00:00"))
+
+            # Parse liquidity (Kalshi provides liquidity_dollars)
+            liquidity_raw = data.get("liquidity_dollars", "0")
+            if isinstance(liquidity_raw, str):
+                liquidity = Decimal(liquidity_raw)
+            else:
+                liquidity = Decimal(str(liquidity_raw))
 
             market = Market(
                 id=data.get("ticker", ""),
@@ -178,6 +183,7 @@ class KalshiClient(BaseDataSource):
                 category=data.get("category", ""),
                 outcomes=outcomes,
                 volume_24h=Decimal(str(data.get("volume_24h", "0"))),
+                liquidity=liquidity,
                 end_date=end_date,
                 resolved=data.get("status") == "settled",
                 resolution=data.get("result"),
@@ -216,3 +222,112 @@ class KalshiClient(BaseDataSource):
         except httpx.HTTPError as e:
             self.logger.error(f"Failed to fetch events: {e}")
             return []
+
+    async def get_orderbook(self, market_id: str, depth: int = 10) -> dict | None:
+        """
+        Fetch orderbook for a specific market.
+
+        Args:
+            market_id: The market ticker
+            depth: Number of price levels to fetch (default 10)
+
+        Returns:
+            Orderbook data with bids and asks, or None on error
+        """
+        if not self._client:
+            raise RuntimeError("Client not connected. Call connect() first.")
+
+        try:
+            async with self._throttler:
+                response = await self._client.get(
+                    f"{KALSHI_API_URL}/markets/{market_id}/orderbook",
+                    params={"depth": depth},
+                )
+                response.raise_for_status()
+                data = response.json()
+
+            # Parse orderbook
+            orderbook = data.get("orderbook", {})
+            return {
+                "yes": self._parse_orderbook_side(orderbook.get("yes", [])),
+                "no": self._parse_orderbook_side(orderbook.get("no", [])),
+                "market_id": market_id,
+            }
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                self.logger.warning(f"Orderbook not found: {market_id}")
+                return None
+            self.logger.error(f"Failed to fetch orderbook: {e}")
+            return None
+        except httpx.HTTPError as e:
+            self.logger.error(f"Failed to fetch orderbook for {market_id}: {e}")
+            return None
+
+    def _parse_orderbook_side(self, levels: list[list]) -> dict:
+        """
+        Parse one side of the orderbook.
+
+        Args:
+            levels: List of [price, quantity] pairs
+
+        Returns:
+            Dict with best price, total depth, and levels
+        """
+        if not levels:
+            return {"best_price": None, "total_depth": Decimal("0"), "levels": []}
+
+        parsed_levels = []
+        total_depth = Decimal("0")
+
+        for level in levels:
+            if len(level) >= 2:
+                price = Decimal(str(level[0])) / 100  # Convert cents to dollars
+                quantity = Decimal(str(level[1]))
+                parsed_levels.append({"price": price, "quantity": quantity})
+                total_depth += quantity
+
+        best_price = parsed_levels[0]["price"] if parsed_levels else None
+
+        return {
+            "best_price": best_price,
+            "total_depth": total_depth,
+            "levels": parsed_levels,
+        }
+
+    async def get_market_with_orderbook(self, market_id: str) -> Market | None:
+        """
+        Fetch a market with orderbook depth data.
+
+        Args:
+            market_id: The market ticker
+
+        Returns:
+            Market with orderbook depth populated, or None
+        """
+        # Fetch market and orderbook in parallel
+        import asyncio
+
+        market_task = self.get_market(market_id)
+        orderbook_task = self.get_orderbook(market_id)
+
+        market, orderbook = await asyncio.gather(market_task, orderbook_task)
+
+        if not market:
+            return None
+
+        # Enrich market with orderbook depth
+        if orderbook:
+            for outcome in market.outcomes:
+                if outcome.name.upper() == "YES":
+                    yes_data = orderbook.get("yes", {})
+                    outcome.ask_depth = yes_data.get("total_depth", Decimal("0"))
+                    if yes_data.get("best_price"):
+                        outcome.best_ask = yes_data["best_price"]
+                elif outcome.name.upper() == "NO":
+                    no_data = orderbook.get("no", {})
+                    outcome.ask_depth = no_data.get("total_depth", Decimal("0"))
+                    if no_data.get("best_price"):
+                        outcome.best_ask = no_data["best_price"]
+
+        return market

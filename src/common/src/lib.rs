@@ -3,7 +3,10 @@
 //! Provides shared functionality:
 //! - Configuration loading from .env
 //! - Database connection pooling
-//! - Gamma API client
+//! - Gamma API client (Polymarket)
+//! - Kalshi API client
+//! - Limitless API client
+//! - Platform abstraction for cross-platform arbitrage
 //! - Shared data models
 //! - Binance WebSocket client
 //! - Trading executor utilities
@@ -14,7 +17,12 @@ pub mod config;
 pub mod db;
 pub mod executor;
 pub mod gamma;
+pub mod kalshi;
+pub mod kalshi_ws;
+pub mod limitless;
+pub mod limitless_ws;
 pub mod models;
+pub mod platform;
 pub mod repository;
 
 pub use binance_ws::{
@@ -38,4 +46,39 @@ pub use repository::{
     update_no_best_prices, update_no_orderbook, update_yes_best_prices, update_yes_orderbook,
     upsert_market, upsert_market_resolution, FillEstimate, MarketResolution,
     MarketResolutionInsert, MarketWithOrderbook, MarketWithPrices, OrderbookLevel,
+    // Kalshi and cross-platform functions
+    upsert_kalshi_market, get_markets_by_platform, get_platform_markets_with_prices,
+    update_kalshi_prices, update_polymarket_prices, upsert_cross_platform_match, get_cross_platform_matches,
+    record_cross_platform_opportunity, get_recent_opportunities,
+    KalshiMarketInsert, MarketWithPlatform, CrossPlatformMatchInsert,
+    // Limitless functions
+    upsert_limitless_market, update_limitless_prices, get_limitless_markets_with_prices,
+    LimitlessMarketInsert,
+};
+
+// Kalshi API client
+pub use kalshi::{
+    KalshiClient, KalshiError, KalshiMarket, KalshiMarketType, KalshiOrderbook,
+    ParsedKalshiMarket, KALSHI_API_URL, KALSHI_CRYPTO_ASSETS,
+};
+
+// Platform abstraction for cross-platform arbitrage
+pub use platform::{
+    CrossPlatformOpportunity, MarketPair, OrderbookDepth, Platform, UnifiedMarket,
+};
+
+// Kalshi WebSocket streaming
+pub use kalshi_ws::{
+    KalshiOrderbookUpdate, KalshiWsClient, run_kalshi_orderbook_stream, KALSHI_WS_URL,
+};
+
+// Limitless API client
+pub use limitless::{
+    LimitlessClient, LimitlessError, LimitlessMarket, LimitlessMarketType, LimitlessOrderbook,
+    ParsedLimitlessMarket, LIMITLESS_API_URL, LIMITLESS_CRYPTO_ASSETS, LIMITLESS_WS_URL,
+};
+
+// Limitless WebSocket streaming
+pub use limitless_ws::{
+    LimitlessOrderbookUpdate, LimitlessWsClient, run_limitless_orderbook_stream,
 };

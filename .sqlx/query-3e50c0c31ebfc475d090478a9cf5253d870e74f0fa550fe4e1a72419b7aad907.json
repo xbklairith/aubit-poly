@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            cpo.id,\n            cpo.match_id,\n            cpo.buy_yes_platform,\n            cpo.buy_no_platform,\n            cpo.total_cost,\n            cpo.gross_profit_pct,\n            cpo.net_profit_pct,\n            cpo.detected_at\n        FROM cross_platform_opportunities cpo\n        WHERE cpo.status = 'detected'\n        ORDER BY cpo.detected_at DESC\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "match_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "buy_yes_platform",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "buy_no_platform",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_cost",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 5,
+        "name": "gross_profit_pct",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 6,
+        "name": "net_profit_pct",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 7,
+        "name": "detected_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "3e50c0c31ebfc475d090478a9cf5253d870e74f0fa550fe4e1a72419b7aad907"
+}

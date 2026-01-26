@@ -12,6 +12,7 @@ class Platform(str, Enum):
 
     POLYMARKET = "polymarket"
     KALSHI = "kalshi"
+    LIMITLESS = "limitless"
     PREDICTIT = "predictit"
     METACULUS = "metaculus"
     BINANCE = "binance"
@@ -122,9 +123,11 @@ class Market(BaseModel):
     @property
     def yes_ask_price(self) -> Decimal | None:
         """Get YES outcome ask price (for buying). Falls back to price if no ask."""
+        # Check for explicit YES/UP outcome names
         for outcome in self.outcomes:
-            if outcome.name.upper() in ("YES", "TRUE", "1"):
+            if outcome.name.upper() in ("YES", "TRUE", "1", "UP"):
                 return outcome.best_ask if outcome.best_ask else outcome.price
+        # Fallback to first outcome
         if self.outcomes:
             o = self.outcomes[0]
             return o.best_ask if o.best_ask else o.price
@@ -133,9 +136,11 @@ class Market(BaseModel):
     @property
     def no_ask_price(self) -> Decimal | None:
         """Get NO outcome ask price (for buying). Falls back to price if no ask."""
+        # Check for explicit NO/DOWN outcome names
         for outcome in self.outcomes:
-            if outcome.name.upper() in ("NO", "FALSE", "0"):
+            if outcome.name.upper() in ("NO", "FALSE", "0", "DOWN"):
                 return outcome.best_ask if outcome.best_ask else outcome.price
+        # Fallback to second outcome
         if len(self.outcomes) > 1:
             o = self.outcomes[1]
             return o.best_ask if o.best_ask else o.price

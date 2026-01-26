@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            cpm.id,\n            cpm.polymarket_id,\n            cpm.kalshi_id,\n            cpm.match_confidence,\n            cpm.match_reason\n        FROM cross_platform_matches cpm\n        WHERE cpm.match_confidence >= $1\n          AND cpm.invalidated_at IS NULL\n        ORDER BY cpm.match_confidence DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "polymarket_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "kalshi_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "match_confidence",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "match_reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Numeric"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "521855ecec8e4ab56dd77f383a58dafe74711a8d0fa1b47d34723a8eff8be581"
+}

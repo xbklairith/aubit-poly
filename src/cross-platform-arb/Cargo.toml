@@ -1,34 +1,26 @@
 [package]
-name = "common"
+name = "cross-platform-arb"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "cross-platform-arb"
+path = "src/main.rs"
+
 [dependencies]
+common = { path = "../common" }
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 sqlx.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dotenvy.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros = "1.36"
-url.workspace = true
-futures-util.workspace = true
-anyhow = "1.0"
-http = "1.1"
-
-# RSA signing for Kalshi auth
-rsa = { version = "0.9", features = ["sha2"] }
-base64 = "0.22"
-
-# Polymarket SDK
-polymarket-client-sdk.workspace = true
-alloy.workspace = true
-
-[dev-dependencies]
-serial_test = "3"

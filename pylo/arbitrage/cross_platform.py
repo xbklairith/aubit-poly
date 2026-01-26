@@ -3,22 +3,14 @@
 import logging
 from decimal import Decimal
 
+from pylo.arbitrage.event_matcher import AutoEventMatcher
+from pylo.arbitrage.profitability_filter import ProfitabilityFilter
+from pylo.arbitrage.resolution_validator import ResolutionValidator
 from pylo.config.settings import get_settings
 from pylo.models.market import Market, Platform
 from pylo.models.opportunity import CrossPlatformArbOpportunity
 
 logger = logging.getLogger(__name__)
-
-
-# Known event mappings between platforms
-# These are examples - in production, use fuzzy matching or manual curation
-EVENT_MAPPINGS: dict[str, dict[Platform, str]] = {
-    # Example: BTC price predictions
-    "btc_100k_jan": {
-        Platform.POLYMARKET: "btc-100000-jan",  # Example IDs
-        Platform.KALSHI: "BTCUSD-100K-JAN",
-    },
-}
 
 
 class CrossPlatformDetector:
@@ -29,6 +21,17 @@ class CrossPlatformDetector:
         self.settings = get_settings()
         self.min_profit = self.settings.min_cross_platform_arb_profit
         self.logger = logging.getLogger(__name__)
+
+        # Automatic event matcher (replaces hardcoded EVENT_MAPPINGS)
+        self.event_matcher = AutoEventMatcher(
+            min_confidence=self.settings.cross_platform_min_match_confidence
+        )
+
+        # Resolution rule validator (CRITICAL for safety)
+        self.resolution_validator = ResolutionValidator()
+
+        # Profitability filter (avoid unprofitable trades)
+        self.profitability_filter = ProfitabilityFilter()
 
         # Cache markets by platform
         self._market_cache: dict[Platform, dict[str, Market]] = {}
@@ -82,10 +85,10 @@ class CrossPlatformDetector:
         """
         Find markets that represent the same event across platforms.
 
-        Uses multiple strategies:
-        1. Known event mappings
-        2. Fuzzy name matching
-        3. Category + date matching
+        Uses automatic entity-based matching:
+        1. Extract entities (asset, price, direction, date)
+        2. Match markets with identical entities
+        3. Filter by confidence threshold
 
         Args:
             markets_by_platform: Markets grouped by platform
@@ -95,28 +98,21 @@ class CrossPlatformDetector:
         """
         matches: list[dict[Platform, Market]] = []
 
-        # Strategy 1: Use known event mappings
-        for _event_name, platform_ids in EVENT_MAPPINGS.items():
-            match: dict[Platform, Market] = {}
-            for platform, market_id in platform_ids.items():
-                if platform in self._market_cache:
-                    market = self._market_cache[platform].get(market_id)
-                    if market:
-                        match[platform] = market
+        # Use automatic event matcher
+        matched_pairs = self.event_matcher.match_all_platforms(markets_by_platform)
 
-            if len(match) >= 2:
-                matches.append(match)
+        for pair in matched_pairs:
+            # Convert MatchedPair to the expected format
+            match = {
+                pair.market_a.platform: pair.market_a,
+                pair.market_b.platform: pair.market_b,
+            }
+            matches.append(match)
 
-        # Strategy 2: Fuzzy name matching
-        # Match markets with similar names across platforms
-        platforms = list(markets_by_platform.keys())
-
-        for i, platform_a in enumerate(platforms):
-            for platform_b in platforms[i + 1 :]:
-                for market_a in markets_by_platform.get(platform_a, []):
-                    for market_b in markets_by_platform.get(platform_b, []):
-                        if self._markets_match(market_a, market_b):
-                            matches.append({platform_a: market_a, platform_b: market_b})
+            self.logger.debug(
+                f"Matched: {pair.market_a.name} <-> {pair.market_b.name} "
+                f"(confidence: {pair.confidence:.0%}, reason: {pair.match_reason})"
+            )
 
         return matches
 
@@ -163,9 +159,7 @@ class CrossPlatformDetector:
 
         # STRICT: Dates must match exactly for arbitrage
         if not self._dates_match_exact(market_a, market_b):
-            self.logger.debug(
-                f"Date mismatch: {market_a.name} vs {market_b.name}"
-            )
+            self.logger.debug(f"Date mismatch: {market_a.name} vs {market_b.name}")
             return False
 
         return True
@@ -173,11 +167,16 @@ class CrossPlatformDetector:
     def _extract_asset(self, name: str) -> str | None:
         """Extract crypto asset from market name."""
         asset_map = {
-            "btc": "BTC", "bitcoin": "BTC",
-            "eth": "ETH", "ethereum": "ETH",
-            "sol": "SOL", "solana": "SOL",
-            "xrp": "XRP", "ripple": "XRP",
-            "doge": "DOGE", "dogecoin": "DOGE",
+            "btc": "BTC",
+            "bitcoin": "BTC",
+            "eth": "ETH",
+            "ethereum": "ETH",
+            "sol": "SOL",
+            "solana": "SOL",
+            "xrp": "XRP",
+            "ripple": "XRP",
+            "doge": "DOGE",
+            "dogecoin": "DOGE",
         }
         for keyword, asset in asset_map.items():
             if keyword in name:
@@ -237,6 +236,8 @@ class CrossPlatformDetector:
         """
         Check a market match for arbitrage opportunities.
 
+        Includes resolution validation and profitability filtering.
+
         Args:
             match: Dictionary of platform -> market
 
@@ -251,6 +252,18 @@ class CrossPlatformDetector:
             for platform_b in platforms[i + 1 :]:
                 market_a = match[platform_a]
                 market_b = match[platform_b]
+
+                # CRITICAL: Validate resolution rules before proceeding
+                is_safe, reason = self.resolution_validator.is_safe_for_arbitrage(
+                    market_a, market_b
+                )
+                if not is_safe:
+                    self.logger.warning(
+                        f"Skipping match due to resolution risk: {reason}\n"
+                        f"  Market A: {market_a.name}\n"
+                        f"  Market B: {market_b.name}"
+                    )
+                    continue
 
                 # Check YES on A + NO on B
                 opp1 = self._check_pair(market_a, market_b, "YES_A_NO_B")
@@ -274,7 +287,7 @@ class CrossPlatformDetector:
         Check a specific pair for arbitrage.
 
         Uses ASK prices (what you pay to buy) for accurate calculation.
-        Includes fee estimation from both platforms.
+        Includes fee estimation and profitability filtering.
 
         Args:
             market_yes: Market to buy YES on
@@ -315,18 +328,35 @@ class CrossPlatformDetector:
 
         # Skip if fees eat all profit
         if profit_after_fees <= Decimal("0"):
+            self.logger.debug(f"Skipping cross-platform: profit {gross_profit:.2%} wiped by fees")
+            return None
+
+        # Apply profitability filters (liquidity, time, volume, staleness)
+        filter_result = self.profitability_filter.check_opportunity(
+            market_yes, market_no, gross_profit, total_fees
+        )
+        if not filter_result.passed:
             self.logger.debug(
-                f"Skipping cross-platform: profit {gross_profit:.2%} wiped by fees"
+                f"Skipping cross-platform: {filter_result.reason}\n"
+                f"  Metrics: {filter_result.metrics}"
             )
             return None
 
-        if profit_after_fees < self.min_profit:
-            return None
+        # Calculate optimal position size
+        optimal_size = self.profitability_filter.calculate_optimal_size(
+            market_yes, market_no, gross_profit, total_fees
+        )
+
+        # Estimate slippage for optimal size
+        estimated_slippage = self.profitability_filter.estimate_slippage(
+            market_yes, market_no, optimal_size
+        )
 
         self.logger.info(
             f"Found cross-platform arb: {gross_profit:.2%} gross, "
             f"{profit_after_fees:.2%} after fees - "
-            f"YES@{market_yes.platform.value} + NO@{market_no.platform.value}"
+            f"YES@{market_yes.platform.value} + NO@{market_no.platform.value}\n"
+            f"  Optimal size: ${optimal_size:.0f}, Est. slippage: {estimated_slippage:.2%}"
         )
 
         return CrossPlatformArbOpportunity(
@@ -339,8 +369,10 @@ class CrossPlatformDetector:
             price_b=no_price,
             profit_percentage=gross_profit,
             profit_after_fees=profit_after_fees,
-            profit_absolute=profit_after_fees,
+            profit_absolute=profit_after_fees * optimal_size,
             estimated_fees=total_fees,
+            recommended_size=optimal_size,
+            estimated_slippage=estimated_slippage,
             description=(
                 f"Buy YES@{yes_price:.4f} on {market_yes.platform.value}, "
                 f"NO@{no_price:.4f} on {market_no.platform.value}"
@@ -363,6 +395,10 @@ class CrossPlatformDetector:
                 "5. Guaranteed return: $1.00",
                 f"6. Gross profit: ${gross_profit:.4f} ({gross_profit:.2%})",
                 f"7. Net profit: ${profit_after_fees:.4f} ({profit_after_fees:.2%})",
+                "",
+                f"Recommended position size: ${optimal_size:.0f}",
+                f"Estimated slippage: {estimated_slippage:.2%}",
+                f"Expected absolute profit: ${profit_after_fees * optimal_size:.2f}",
             ],
             liquidity_available=min(
                 market_yes.liquidity or Decimal("0"),

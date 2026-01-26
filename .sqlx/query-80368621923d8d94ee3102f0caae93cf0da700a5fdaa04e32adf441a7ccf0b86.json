@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO markets (\n            platform, condition_id, market_type, asset, timeframe,\n            yes_token_id, no_token_id, name, end_time,\n            rules_primary, liquidity_dollars, strike_price, direction,\n            is_active\n        )\n        VALUES (\n            'kalshi', $1, $2, $3, $4,\n            $1, $1, $5, $6,\n            $7, $8, $9, $10,\n            true\n        )\n        ON CONFLICT (platform, condition_id) DO UPDATE SET\n            market_type = EXCLUDED.market_type,\n            asset = EXCLUDED.asset,\n            timeframe = EXCLUDED.timeframe,\n            name = EXCLUDED.name,\n            end_time = EXCLUDED.end_time,\n            rules_primary = EXCLUDED.rules_primary,\n            liquidity_dollars = EXCLUDED.liquidity_dollars,\n            strike_price = EXCLUDED.strike_price,\n            direction = EXCLUDED.direction,\n            is_active = true,\n            updated_at = NOW()\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Numeric",
+        "Float8",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "80368621923d8d94ee3102f0caae93cf0da700a5fdaa04e32adf441a7ccf0b86"
+}

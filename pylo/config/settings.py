@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     kalshi_api_key: SecretStr = SecretStr("")
     kalshi_api_secret: SecretStr = SecretStr("")
 
+    # Limitless Exchange (Polymarket fork on Base L2)
+    limitless_api_url: str = "https://api.limitless.exchange"
+    limitless_ws_url: str = "wss://ws.limitless.exchange/markets"
+    limitless_api_key: SecretStr = SecretStr("")  # Optional for trading
+
     # Binance
     binance_api_key: SecretStr = SecretStr("")
     binance_api_secret: SecretStr = SecretStr("")
@@ -55,13 +60,49 @@ class Settings(BaseSettings):
 
     # Arbitrage thresholds (as decimals, e.g., 0.01 = 1%)
     min_internal_arb_profit: Decimal = Decimal("0.005")
-    min_cross_platform_arb_profit: Decimal = Decimal("0.02")
+    min_cross_platform_arb_profit: Decimal = Decimal("0.035")  # 3.5% (fees ~2.5%)
+    min_cross_platform_15m_arb_profit: Decimal = Decimal("0.01")  # 1.0% for 15m markets (quick execution, lower risk)
     min_hedging_arb_profit: Decimal = Decimal("0.03")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Cross-Platform Arbitrage Settings
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Minimum confidence for automatic event matching (0-1)
+    cross_platform_min_match_confidence: float = Field(default=0.9, ge=0.5, le=1.0)
+
+    # Minimum liquidity depth on each side (USD)
+    cross_platform_min_liquidity: Decimal = Decimal("500")
+    cross_platform_15m_min_liquidity: Decimal = Decimal("100")  # Lower for 15m markets
+
+    # Maximum slippage tolerance (as decimal, e.g., 0.005 = 0.5%)
+    cross_platform_max_slippage: Decimal = Decimal("0.005")
+
+    # Minimum time to resolution (seconds) - avoid last-minute chaos
+    cross_platform_min_time_to_resolution: int = Field(default=3600, ge=60)
+
+    # Minimum time to resolution for 15-minute directional markets (seconds)
+    # These markets are designed for quick trades, so shorter threshold
+    cross_platform_15m_min_time_to_resolution: int = Field(default=120, ge=30)
+
+    # Minimum daily volume indicator (USD) - skip illiquid markets
+    cross_platform_min_daily_volume: Decimal = Decimal("1000")
+    cross_platform_15m_min_daily_volume: Decimal = Decimal("0")  # Disabled for 15m markets (new markets often have 0 volume initially)
+
+    # Resolution validation - only trade markets with matching resolution rules
+    cross_platform_validate_resolution: bool = True
+
+    # Safe resolution sources - markets using these sources are whitelisted
+    # crypto_price: Objective exchange prices (Binance, Coinbase)
+    # sports: Official league/tournament data
+    # government_data: Official Fed/BLS/Census data
+    cross_platform_safe_resolution_types: str = "crypto_price,sports,government_data"
 
     # Platform trading fees (as decimals, e.g., 0.01 = 1%)
     # These are subtracted from profit calculations
     polymarket_fee_rate: Decimal = Decimal("0.00")  # 0% as of 2024
     kalshi_fee_rate: Decimal = Decimal("0.01")  # ~1% variable by market
+    limitless_fee_rate: Decimal = Decimal("0.00")  # 0% fees on Limitless
     binance_fee_rate: Decimal = Decimal("0.0004")  # 0.04% for futures
 
     # Price staleness threshold (seconds) - opportunities with older prices are rejected
@@ -137,10 +178,10 @@ class Settings(BaseSettings):
     edge_trader_starting_balance: Decimal = Decimal("10000")
 
     # Expiry confidence adjustment multipliers
-    edge_trader_early_confidence_mult: Decimal = Decimal("0.6")   # >80% time remaining
-    edge_trader_sweet_spot_confidence: Decimal = Decimal("1.0")   # 20-80% time remaining
-    edge_trader_late_confidence_mult: Decimal = Decimal("0.8")    # 7-20% time remaining
-    edge_trader_near_expiry_mult: Decimal = Decimal("0.4")        # <7% time remaining
+    edge_trader_early_confidence_mult: Decimal = Decimal("0.6")  # >80% time remaining
+    edge_trader_sweet_spot_confidence: Decimal = Decimal("1.0")  # 20-80% time remaining
+    edge_trader_late_confidence_mult: Decimal = Decimal("0.8")  # 7-20% time remaining
+    edge_trader_near_expiry_mult: Decimal = Decimal("0.4")  # <7% time remaining
 
     # Trading fee rate (for EV calculations)
     edge_trader_fee_rate: Decimal = Decimal("0.02")  # 2% Polymarket fee
@@ -169,11 +210,20 @@ class Settings(BaseSettings):
         """Get list of assets to monitor."""
         return [a.strip().upper() for a in self.spread_bot_assets.split(",") if a.strip()]
 
+    def get_safe_resolution_types(self) -> list[str]:
+        """Get list of safe resolution types for cross-platform arbitrage."""
+        return [
+            t.strip().lower()
+            for t in self.cross_platform_safe_resolution_types.split(",")
+            if t.strip()
+        ]
+
     def get_fee_rate(self, platform: str) -> Decimal:
         """Get trading fee rate for a platform."""
         fee_map = {
             "polymarket": self.polymarket_fee_rate,
             "kalshi": self.kalshi_fee_rate,
+            "limitless": self.limitless_fee_rate,
             "binance": self.binance_fee_rate,
         }
         return fee_map.get(platform.lower(), Decimal("0.01"))  # Default 1% if unknown
@@ -190,16 +240,19 @@ class Settings(BaseSettings):
     def has_kalshi_credentials(self) -> bool:
         """Check if Kalshi credentials are configured (only needed for trading)."""
         return bool(
-            self.kalshi_api_key.get_secret_value()
-            and self.kalshi_api_secret.get_secret_value()
+            self.kalshi_api_key.get_secret_value() and self.kalshi_api_secret.get_secret_value()
         )
+
+    @property
+    def has_limitless_credentials(self) -> bool:
+        """Check if Limitless credentials are configured (optional for trading)."""
+        return bool(self.limitless_api_key.get_secret_value())
 
     @property
     def has_binance_credentials(self) -> bool:
         """Check if Binance credentials are configured (only needed for trading)."""
         return bool(
-            self.binance_api_key.get_secret_value()
-            and self.binance_api_secret.get_secret_value()
+            self.binance_api_key.get_secret_value() and self.binance_api_secret.get_secret_value()
         )
 
     @property
@@ -210,9 +263,7 @@ class Settings(BaseSettings):
     @property
     def has_telegram_alerts(self) -> bool:
         """Check if Telegram alerts are configured."""
-        return bool(
-            self.telegram_bot_token.get_secret_value() and self.telegram_chat_id
-        )
+        return bool(self.telegram_bot_token.get_secret_value() and self.telegram_chat_id)
 
     @property
     def has_web3_credentials(self) -> bool:
