@@ -34,7 +34,7 @@ use slippage::{calculate_max_profitable_size, parse_polymarket_depth};
 /// Cross-Platform Arbitrage Detector
 #[derive(Parser, Debug)]
 #[command(name = "cross-platform-arb")]
-#[command(about = "Detects arbitrage between Polymarket and Kalshi")]
+#[command(about = "Detects arbitrage between Polymarket and Limitless")]
 struct Args {
     /// Run once and exit (instead of continuous scanning)
     #[arg(long)]

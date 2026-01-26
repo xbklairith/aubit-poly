@@ -382,6 +382,7 @@ async fn run_cycle(
                 result.market_id, result.side
             );
             traded_positions.remove(&(result.market_id, result.side.clone()));
+            metrics.record_cancel();
         }
     }
 

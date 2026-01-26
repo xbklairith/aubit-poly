@@ -126,7 +126,7 @@ impl CrossPlatformDetector {
         }
         if !self.check_price_freshness(&pair.kalshi) {
             debug!(
-                "Skipping pair (stale Kalshi price): {}",
+                "Skipping pair (stale Limitless price): {}",
                 pair.kalshi.name
             );
             return false;
@@ -240,7 +240,7 @@ impl ScanSummary {
 
     pub fn log(&self) {
         info!(
-            "Scan complete: {} Polymarket, {} Kalshi, {} matches, {} opportunities",
+            "Scan complete: {} Polymarket, {} Limitless, {} matches, {} opportunities",
             self.polymarket_count,
             self.kalshi_count,
             self.matches_found,

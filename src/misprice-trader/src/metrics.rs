@@ -63,7 +63,6 @@ impl Metrics {
     }
 
     /// Record an order cancellation (timeout).
-    #[allow(dead_code)]
     pub fn record_cancel(&mut self) {
         self.orders_cancelled += 1;
     }

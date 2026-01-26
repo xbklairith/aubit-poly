@@ -252,7 +252,7 @@ impl EventMatcher {
         let mut matches = Vec::new();
 
         info!(
-            "Matching {} Polymarket markets against {} Kalshi markets",
+            "Matching {} Polymarket markets against {} Limitless markets",
             polymarket.len(),
             kalshi.len()
         );
