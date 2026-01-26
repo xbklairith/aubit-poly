@@ -163,7 +163,6 @@ services:
       DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
       RUST_LOG: info
     command: >
-      --dry-run
       --trailing-stop-pct 0.10
       --take-profit-pct 0.30
       --limit-price 0.40
@@ -171,7 +170,7 @@ services:
       --max-expiry-minutes 10
       --min-expiry-minutes 1
       --max-orderbook-age 1
-      --assets BTC
+      --assets BTC,ETH,SOL,XRP
     restart: unless-stopped
     networks:
       - aubit-net
