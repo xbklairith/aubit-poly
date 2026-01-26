@@ -34,7 +34,7 @@ pub use config::Config;
 pub use db::Database;
 pub use executor::{
     cancel_order, cancel_order_standalone, ensure_authenticated, execute_sell_order, execute_trade,
-    CachedAuth, DryRunPortfolio, SimulatedPosition, MAX_SHARES,
+    query_order_fill_standalone, CachedAuth, DryRunPortfolio, SimulatedPosition, MAX_SHARES,
 };
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{

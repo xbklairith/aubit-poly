@@ -12,7 +12,8 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use common::cancel_order_standalone;
+use common::{cancel_order_standalone, query_order_fill_standalone};
+use rust_decimal_macros::dec;
 
 /// Status of a pending order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,56 +149,57 @@ impl OrderManager {
         self.cancel_tasks.spawn(async move {
             tokio::time::sleep(Duration::from_secs(timeout)).await;
 
-            match cancel_order_standalone(oid.clone()).await {
-                Ok(()) => {
-                    info!(
-                        "[CANCEL] Order {} cancelled after {}s timeout",
-                        oid, timeout
-                    );
-                    CancelResult {
-                        order_id: oid,
-                        market_id: mid,
-                        market_name: mname,
-                        side: s,
-                        success: true,
-                        was_filled: false,
-                        error_msg: None,
-                        token_id: tid,
-                        shares: sh,
-                        price: pr,
-                    }
-                }
-                Err(e) => {
-                    let error_str = e.to_string().to_lowercase();
-                    // Heuristic: if error contains "not found" or "already filled",
-                    // the order was likely filled
-                    let was_filled = error_str.contains("not found")
-                        || error_str.contains("already")
-                        || error_str.contains("filled")
-                        || error_str.contains("does not exist");
+            // First, try to cancel the order
+            let cancel_result = cancel_order_standalone(oid.clone()).await;
+            let cancel_success = cancel_result.is_ok();
+            let cancel_error = cancel_result.err().map(|e| e.to_string());
 
-                    if was_filled {
+            // Query order status to check actual fill amount (regardless of cancel result)
+            // Polymarket cancel returns Ok even for already-filled orders
+            let (was_filled, filled_amount) = match query_order_fill_standalone(&oid).await {
+                Ok(size_matched) => {
+                    let filled = size_matched > dec!(0);
+                    if filled {
                         info!(
-                            "[FILLED] Order {} likely filled (cancel returned: {})",
-                            oid, e
+                            "[FILLED] Order {} was filled: {} shares",
+                            oid, size_matched
                         );
                     } else {
-                        warn!("[CANCEL FAILED] Order {} error: {}", oid, e);
+                        info!(
+                            "[CANCEL] Order {} cancelled after {}s timeout (0 filled)",
+                            oid, timeout
+                        );
                     }
-
-                    CancelResult {
-                        order_id: oid,
-                        market_id: mid,
-                        market_name: mname,
-                        side: s,
-                        success: false,
-                        was_filled,
-                        error_msg: Some(e.to_string()),
-                        token_id: tid,
-                        shares: sh,
-                        price: pr,
-                    }
+                    (filled, size_matched)
                 }
+                Err(e) => {
+                    // Query failed - fall back to cancel error heuristic
+                    warn!("[ORDER] Failed to query order {} status: {}", oid, e);
+                    let was_filled = cancel_error
+                        .as_ref()
+                        .map(|err| {
+                            let error_str = err.to_lowercase();
+                            error_str.contains("not found")
+                                || error_str.contains("already")
+                                || error_str.contains("filled")
+                                || error_str.contains("does not exist")
+                        })
+                        .unwrap_or(false);
+                    (was_filled, dec!(0))
+                }
+            };
+
+            CancelResult {
+                order_id: oid,
+                market_id: mid,
+                market_name: mname,
+                side: s,
+                success: cancel_success && !was_filled,
+                was_filled,
+                error_msg: cancel_error,
+                token_id: tid,
+                shares: if was_filled { Some(filled_amount) } else { sh },
+                price: pr,
             }
         });
 

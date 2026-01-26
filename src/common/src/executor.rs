@@ -623,3 +623,20 @@ pub async fn cancel_order_standalone(order_id: String) -> Result<()> {
 
     Ok(())
 }
+
+/// Query order fill amount (standalone - creates own auth).
+/// Returns the size_matched (filled amount) for the order.
+/// Use this after cancel to check if an order was actually filled.
+pub async fn query_order_fill_standalone(order_id: &str) -> Result<Decimal> {
+    let mut auth: Option<CachedAuth> = None;
+    ensure_authenticated(&mut auth).await?;
+
+    let auth = auth.as_ref().unwrap();
+
+    let order_info = timeout(Duration::from_secs(10), auth.client.order(order_id))
+        .await
+        .context("Order query timed out")?
+        .context("Failed to query order")?;
+
+    Ok(order_info.size_matched)
+}
