@@ -10,6 +10,7 @@ members = [
     "src/expiry-scalper",
     "src/momentum-trader",
     "src/misprice-trader",
+    "src/misprice-trader-chainlink",
     "src/cross-platform-arb",
 ]
 

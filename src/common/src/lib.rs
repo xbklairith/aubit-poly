@@ -23,6 +23,7 @@ pub mod limitless;
 pub mod limitless_ws;
 pub mod models;
 pub mod platform;
+pub mod polymarket_rtds;
 pub mod repository;
 
 pub use binance_ws::{
@@ -38,38 +39,64 @@ pub use executor::{
 };
 pub use gamma::{GammaClient, GammaMarket, MarketType, ParsedMarket};
 pub use repository::{
-    calculate_effective_fill_price, calculate_fill_price_with_slippage, deactivate_expired_markets,
-    get_15m_updown_markets_with_fresh_orderbooks, get_15m_updown_markets_with_orderbooks,
-    get_active_markets, get_active_markets_expiring_within, get_latest_orderbook_snapshot,
-    get_market_by_condition_id, get_market_resolution, get_market_resolutions_batch,
-    get_markets_with_fresh_orderbooks, get_priority_markets_hybrid, insert_orderbook_snapshot,
-    update_no_best_prices, update_no_orderbook, update_yes_best_prices, update_yes_orderbook,
-    upsert_market, upsert_market_resolution, FillEstimate, MarketResolution,
-    MarketResolutionInsert, MarketWithOrderbook, MarketWithPrices, OrderbookLevel,
+    calculate_effective_fill_price,
+    calculate_fill_price_with_slippage,
+    deactivate_expired_markets,
+    get_15m_updown_markets_with_fresh_orderbooks,
+    get_15m_updown_markets_with_orderbooks,
+    get_active_markets,
+    get_active_markets_expiring_within,
+    get_cross_platform_matches,
+    get_latest_orderbook_snapshot,
+    get_limitless_markets_with_prices,
+    get_market_by_condition_id,
+    get_market_resolution,
+    get_market_resolutions_batch,
+    get_markets_by_platform,
+    get_markets_with_fresh_orderbooks,
+    get_platform_markets_with_prices,
+    get_priority_markets_hybrid,
+    get_recent_opportunities,
+    insert_orderbook_snapshot,
+    record_cross_platform_opportunity,
+    update_kalshi_prices,
+    update_limitless_prices,
+    update_no_best_prices,
+    update_no_orderbook,
+    update_polymarket_prices,
+    update_yes_best_prices,
+    update_yes_orderbook,
+    upsert_cross_platform_match,
     // Kalshi and cross-platform functions
-    upsert_kalshi_market, get_markets_by_platform, get_platform_markets_with_prices,
-    update_kalshi_prices, update_polymarket_prices, upsert_cross_platform_match, get_cross_platform_matches,
-    record_cross_platform_opportunity, get_recent_opportunities,
-    KalshiMarketInsert, MarketWithPlatform, CrossPlatformMatchInsert,
+    upsert_kalshi_market,
     // Limitless functions
-    upsert_limitless_market, update_limitless_prices, get_limitless_markets_with_prices,
+    upsert_limitless_market,
+    upsert_market,
+    upsert_market_resolution,
+    CrossPlatformMatchInsert,
+    FillEstimate,
+    KalshiMarketInsert,
     LimitlessMarketInsert,
+    MarketResolution,
+    MarketResolutionInsert,
+    MarketWithOrderbook,
+    MarketWithPlatform,
+    MarketWithPrices,
+    OrderbookLevel,
 };
 
 // Kalshi API client
 pub use kalshi::{
-    KalshiClient, KalshiError, KalshiMarket, KalshiMarketType, KalshiOrderbook,
-    ParsedKalshiMarket, KALSHI_API_URL, KALSHI_CRYPTO_ASSETS,
+    KalshiClient, KalshiError, KalshiMarket, KalshiMarketType, KalshiOrderbook, ParsedKalshiMarket,
+    KALSHI_API_URL, KALSHI_CRYPTO_ASSETS,
 };
 
 // Platform abstraction for cross-platform arbitrage
-pub use platform::{
-    CrossPlatformOpportunity, MarketPair, OrderbookDepth, Platform, UnifiedMarket,
-};
+pub use platform::{CrossPlatformOpportunity, MarketPair, OrderbookDepth, Platform, UnifiedMarket};
 
 // Kalshi WebSocket streaming
 pub use kalshi_ws::{
-    KalshiOrderbookUpdate, KalshiWsClient, run_kalshi_orderbook_stream, KALSHI_WS_URL,
+    run_kalshi_orderbook_stream, KalshiOrderbookUpdate, KalshiWsClient, KALSHI_WS_URL,
 };
 
 // Limitless API client
@@ -80,5 +107,11 @@ pub use limitless::{
 
 // Limitless WebSocket streaming
 pub use limitless_ws::{
-    LimitlessOrderbookUpdate, LimitlessWsClient, run_limitless_orderbook_stream,
+    run_limitless_orderbook_stream, LimitlessOrderbookUpdate, LimitlessWsClient,
+};
+
+// Polymarket RTDS (Chainlink prices)
+pub use polymarket_rtds::{
+    asset_to_chainlink_symbol, chainlink_symbol_to_asset, ChainlinkPrice, ChainlinkPriceBuffer,
+    PolymarketRtdsClient, RtdsStream, TimestampedPrice, POLYMARKET_RTDS_URL,
 };

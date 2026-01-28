@@ -16,6 +16,7 @@ COPY src/momentum-trader/Cargo.toml src/momentum-trader/Cargo.toml
 COPY src/misprice-trader/Cargo.toml src/misprice-trader/Cargo.toml
 COPY src/cross-platform-arb/Cargo.toml src/cross-platform-arb/Cargo.toml
 COPY src/kalshi-orderbook-stream/Cargo.toml src/kalshi-orderbook-stream/Cargo.toml
+COPY src/misprice-trader-chainlink/Cargo.toml src/misprice-trader-chainlink/Cargo.toml
 # Create dummy source files for cargo metadata to work
 RUN mkdir -p src/common/src && echo "" > src/common/src/lib.rs && \
     mkdir -p src/market-scanner/src && echo "fn main(){}" > src/market-scanner/src/main.rs && \
@@ -25,6 +26,7 @@ RUN mkdir -p src/common/src && echo "" > src/common/src/lib.rs && \
     mkdir -p src/expiry-scalper/src && echo "fn main(){}" > src/expiry-scalper/src/main.rs && \
     mkdir -p src/momentum-trader/src && echo "fn main(){}" > src/momentum-trader/src/main.rs && \
     mkdir -p src/misprice-trader/src && echo "fn main(){}" > src/misprice-trader/src/main.rs && \
+    mkdir -p src/misprice-trader-chainlink/src && echo "fn main(){}" > src/misprice-trader-chainlink/src/main.rs && \
     mkdir -p src/cross-platform-arb/src && echo "fn main(){}" > src/cross-platform-arb/src/main.rs && \
     mkdir -p src/kalshi-orderbook-stream/src && echo "fn main(){}" > src/kalshi-orderbook-stream/src/main.rs
 RUN cargo chef prepare --recipe-path recipe.json
@@ -65,5 +67,6 @@ COPY --from=builder /app/target/release/momentum-trader /usr/local/bin/
 COPY --from=builder /app/target/release/misprice-trader /usr/local/bin/
 COPY --from=builder /app/target/release/cross-platform-arb /usr/local/bin/
 COPY --from=builder /app/target/release/kalshi-orderbook-stream /usr/local/bin/
+COPY --from=builder /app/target/release/misprice-trader-chainlink /usr/local/bin/
 
 ENTRYPOINT ["trade-executor"]
