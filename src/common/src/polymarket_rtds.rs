@@ -50,12 +50,14 @@ pub fn chainlink_symbol_to_asset(symbol: &str) -> Option<&'static str> {
 
 /// Subscription message for RTDS WebSocket.
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct SubscriptionMessage {
     action: String,
     subscriptions: Vec<Subscription>,
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct Subscription {
     topic: String,
     #[serde(rename = "type")]
@@ -65,8 +67,23 @@ struct Subscription {
 
 /// Filter for Chainlink price subscription.
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct ChainlinkFilter {
     symbol: String,
+}
+
+/// Subscription message without filter (for subscribing to all prices).
+#[derive(Debug, Serialize)]
+struct SubscriptionMessageNoFilter {
+    action: String,
+    subscriptions: Vec<SubscriptionNoFilter>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionNoFilter {
+    topic: String,
+    #[serde(rename = "type")]
+    msg_type: String,
 }
 
 /// Raw RTDS message wrapper.
@@ -154,29 +171,23 @@ impl PolymarketRtdsClient {
 
         let (mut write, read) = ws_stream.split();
 
-        // Subscribe to each symbol
-        for symbol in &self.symbols {
-            let filter = serde_json::to_string(&ChainlinkFilter {
-                symbol: symbol.clone(),
-            })?;
+        // Subscribe to ALL chainlink prices (no filter).
+        // The RTDS filter parameter doesn't work correctly for individual symbols,
+        // so we subscribe to all and filter locally in next_price().
+        let sub_msg = SubscriptionMessageNoFilter {
+            action: "subscribe".to_string(),
+            subscriptions: vec![SubscriptionNoFilter {
+                topic: "crypto_prices_chainlink".to_string(),
+                msg_type: "*".to_string(),
+            }],
+        };
 
-            let sub_msg = SubscriptionMessage {
-                action: "subscribe".to_string(),
-                subscriptions: vec![Subscription {
-                    topic: "crypto_prices_chainlink".to_string(),
-                    msg_type: "*".to_string(),
-                    filters: filter,
-                }],
-            };
-
-            let msg_json = serde_json::to_string(&sub_msg)?;
-            debug!("Subscribing to RTDS: {}", msg_json);
-            write.send(Message::Text(msg_json.into())).await?;
-        }
+        let msg_json = serde_json::to_string(&sub_msg)?;
+        debug!("Subscribing to RTDS: {}", msg_json);
+        write.send(Message::Text(msg_json.into())).await?;
 
         info!(
-            "Subscribed to {} Chainlink symbols: {:?}",
-            self.symbols.len(),
+            "Subscribed to Chainlink prices, filtering locally for: {:?}",
             self.symbols
         );
 
@@ -281,6 +292,11 @@ impl RtdsStream {
                 return None;
             }
         };
+
+        // Filter locally: only return prices for symbols we're interested in
+        if !self.symbols.contains(&payload.symbol) {
+            return None;
+        }
 
         // Convert f64 to Decimal
         let value = match Decimal::try_from(payload.value) {
