@@ -278,13 +278,10 @@ impl LimitlessWsClient {
         info!("Connecting to Limitless WebSocket at {}", self.ws_url);
 
         // Connect with timeout
-        let (ws_stream, response) = timeout(
-            Duration::from_secs(10),
-            connect_async(&self.ws_url),
-        )
-        .await
-        .map_err(|_| anyhow!("WebSocket connection timeout"))?
-        .map_err(|e| anyhow!("WebSocket connection failed: {}", e))?;
+        let (ws_stream, response) = timeout(Duration::from_secs(10), connect_async(&self.ws_url))
+            .await
+            .map_err(|_| anyhow!("WebSocket connection timeout"))?
+            .map_err(|e| anyhow!("WebSocket connection failed: {}", e))?;
 
         info!(
             "Connected to Limitless WebSocket (status: {})",
@@ -307,7 +304,8 @@ impl LimitlessWsClient {
 
         // Initialize local orderbooks
         for slug in &slugs {
-            self.orderbooks.insert(slug.clone(), LocalOrderbook::default());
+            self.orderbooks
+                .insert(slug.clone(), LocalOrderbook::default());
         }
 
         // Process messages

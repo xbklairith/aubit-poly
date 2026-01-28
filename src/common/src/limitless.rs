@@ -331,7 +331,10 @@ impl LimitlessClient {
     }
 
     /// Fetch a single market by slug.
-    pub async fn fetch_market(&self, slug: &str) -> Result<Option<LimitlessMarket>, LimitlessError> {
+    pub async fn fetch_market(
+        &self,
+        slug: &str,
+    ) -> Result<Option<LimitlessMarket>, LimitlessError> {
         self.rate_limit().await;
 
         let url = format!("{}/markets/{}", self.base_url, slug);
@@ -398,7 +401,9 @@ impl LimitlessClient {
     }
 
     /// Fetch all crypto CLOB markets and parse them.
-    pub async fn fetch_parsed_crypto_markets(&self) -> Result<Vec<ParsedLimitlessMarket>, LimitlessError> {
+    pub async fn fetch_parsed_crypto_markets(
+        &self,
+    ) -> Result<Vec<ParsedLimitlessMarket>, LimitlessError> {
         let markets = self.fetch_clob_markets().await?;
 
         let parsed: Vec<ParsedLimitlessMarket> = markets
@@ -584,7 +589,10 @@ fn classify_limitless_market(slug: &str, title: &str) -> (LimitlessMarketType, O
         }
         return (LimitlessMarketType::UpDown, Some("up".to_string()));
     }
-    if slug_lower.contains("down") || title_lower.contains(" down ") || title_lower.ends_with(" down") {
+    if slug_lower.contains("down")
+        || title_lower.contains(" down ")
+        || title_lower.ends_with(" down")
+    {
         return (LimitlessMarketType::UpDown, Some("down".to_string()));
     }
 
@@ -668,9 +676,21 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(market.yes_bid_decimal(), Some(Decimal::try_from(0.55).unwrap()));
-        assert_eq!(market.yes_ask_decimal(), Some(Decimal::try_from(0.60).unwrap()));
-        assert_eq!(market.no_bid_decimal(), Some(Decimal::try_from(0.40).unwrap()));
-        assert_eq!(market.no_ask_decimal(), Some(Decimal::try_from(0.45).unwrap()));
+        assert_eq!(
+            market.yes_bid_decimal(),
+            Some(Decimal::try_from(0.55).unwrap())
+        );
+        assert_eq!(
+            market.yes_ask_decimal(),
+            Some(Decimal::try_from(0.60).unwrap())
+        );
+        assert_eq!(
+            market.no_bid_decimal(),
+            Some(Decimal::try_from(0.40).unwrap())
+        );
+        assert_eq!(
+            market.no_ask_decimal(),
+            Some(Decimal::try_from(0.45).unwrap())
+        );
     }
 }

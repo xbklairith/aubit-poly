@@ -1420,7 +1420,15 @@ pub async fn update_polymarket_prices(
     no_best_ask: Option<Decimal>,
     no_best_bid: Option<Decimal>,
 ) -> Result<(), sqlx::Error> {
-    update_kalshi_prices(pool, market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid).await
+    update_kalshi_prices(
+        pool,
+        market_id,
+        yes_best_ask,
+        yes_best_bid,
+        no_best_ask,
+        no_best_bid,
+    )
+    .await
 }
 
 // =============================================================================
@@ -1509,16 +1517,16 @@ pub async fn upsert_limitless_market(
             updated_at = NOW()
         RETURNING id
         "#,
-        market.slug,              // $1: condition_id
-        market_type,              // $2: market_type
-        market.asset,             // $3: asset
-        market.timeframe,         // $4: timeframe
-        market.yes_position_id,   // $5: yes_token_id (stores position ID)
-        market.no_position_id,    // $6: no_token_id (stores position ID)
-        market.name,              // $7: name
-        market.end_time,          // $8: end_time
-        market.liquidity,         // $9: liquidity_dollars
-        market.direction,         // $10: direction
+        market.slug,            // $1: condition_id
+        market_type,            // $2: market_type
+        market.asset,           // $3: asset
+        market.timeframe,       // $4: timeframe
+        market.yes_position_id, // $5: yes_token_id (stores position ID)
+        market.no_position_id,  // $6: no_token_id (stores position ID)
+        market.name,            // $7: name
+        market.end_time,        // $8: end_time
+        market.liquidity,       // $9: liquidity_dollars
+        market.direction,       // $10: direction
     )
     .fetch_one(pool)
     .await?;
@@ -1536,7 +1544,15 @@ pub async fn update_limitless_prices(
     no_best_ask: Option<Decimal>,
     no_best_bid: Option<Decimal>,
 ) -> Result<(), sqlx::Error> {
-    update_kalshi_prices(pool, market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid).await
+    update_kalshi_prices(
+        pool,
+        market_id,
+        yes_best_ask,
+        yes_best_bid,
+        no_best_ask,
+        no_best_bid,
+    )
+    .await
 }
 
 /// Get Limitless markets with fresh prices for cross-platform matching.
@@ -1546,7 +1562,14 @@ pub async fn get_limitless_markets_with_prices(
     assets: &[String],
     max_expiry_seconds: i64,
 ) -> Result<Vec<MarketWithPlatform>, sqlx::Error> {
-    get_platform_markets_with_prices(pool, "limitless", max_age_seconds, assets, max_expiry_seconds).await
+    get_platform_markets_with_prices(
+        pool,
+        "limitless",
+        max_age_seconds,
+        assets,
+        max_expiry_seconds,
+    )
+    .await
 }
 
 /// Cross-platform match for caching.
@@ -1677,8 +1700,19 @@ pub async fn record_cross_platform_opportunity(
 pub async fn get_recent_opportunities(
     pool: &PgPool,
     limit: i64,
-) -> Result<Vec<(Uuid, Uuid, String, String, Decimal, Decimal, Decimal, DateTime<Utc>)>, sqlx::Error>
-{
+) -> Result<
+    Vec<(
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Decimal,
+        Decimal,
+        Decimal,
+        DateTime<Utc>,
+    )>,
+    sqlx::Error,
+> {
     let results = sqlx::query!(
         r#"
         SELECT

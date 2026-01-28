@@ -97,7 +97,7 @@ pub struct OrderbookSnapshot {
 /// Single price level in orderbook
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceLevel {
-    pub price: i32,  // cents (1-99)
+    pub price: i32, // cents (1-99)
     pub quantity: i64,
 }
 
@@ -107,7 +107,7 @@ pub struct OrderbookDelta {
     pub market_ticker: String,
     pub price: i32,
     pub delta: i64,
-    pub side: String,  // "yes" or "no"
+    pub side: String, // "yes" or "no"
     pub seq: u64,
 }
 
@@ -131,7 +131,7 @@ pub struct KalshiOrderbookUpdate {
 /// Local orderbook state for a single market
 #[derive(Debug, Clone, Default)]
 struct LocalOrderbook {
-    yes_bids: HashMap<i32, i64>,  // price (cents) -> quantity
+    yes_bids: HashMap<i32, i64>, // price (cents) -> quantity
     yes_asks: HashMap<i32, i64>,
     no_bids: HashMap<i32, i64>,
     no_asks: HashMap<i32, i64>,
@@ -203,7 +203,7 @@ impl LocalOrderbook {
         let no_best_ask = yes_best_bid.map(|p| dec!(1) - p);
 
         KalshiOrderbookUpdate {
-            market_ticker: String::new(),  // Will be filled in by caller
+            market_ticker: String::new(), // Will be filled in by caller
             yes_best_bid,
             yes_best_ask,
             no_best_bid,
@@ -238,9 +238,7 @@ impl KalshiAuth {
 
     /// Generate authentication headers for WebSocket connection
     pub fn generate_headers(&self) -> Result<Vec<(String, String)>> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
 
         // Message to sign: timestamp + method + path
         let method = "GET";
@@ -315,15 +313,15 @@ impl KalshiWsClient {
         };
 
         // Connect with timeout
-        let (ws_stream, response) = timeout(
-            Duration::from_secs(10),
-            connect_async(request),
-        )
-        .await
-        .map_err(|_| anyhow!("WebSocket connection timeout"))?
-        .map_err(|e| anyhow!("WebSocket connection failed: {}", e))?;
+        let (ws_stream, response) = timeout(Duration::from_secs(10), connect_async(request))
+            .await
+            .map_err(|_| anyhow!("WebSocket connection timeout"))?
+            .map_err(|e| anyhow!("WebSocket connection failed: {}", e))?;
 
-        info!("Connected to Kalshi WebSocket (status: {})", response.status());
+        info!(
+            "Connected to Kalshi WebSocket (status: {})",
+            response.status()
+        );
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -344,7 +342,8 @@ impl KalshiWsClient {
 
         // Initialize local orderbooks
         for ticker in &tickers {
-            self.orderbooks.insert(ticker.clone(), LocalOrderbook::default());
+            self.orderbooks
+                .insert(ticker.clone(), LocalOrderbook::default());
         }
 
         // Process messages
@@ -513,12 +512,19 @@ mod tests {
         let snapshot = OrderbookSnapshot {
             market_ticker: "KXBTC-25JAN13-T100000".to_string(),
             yes: vec![
-                PriceLevel { price: 55, quantity: 100 },
-                PriceLevel { price: 54, quantity: 200 },
+                PriceLevel {
+                    price: 55,
+                    quantity: 100,
+                },
+                PriceLevel {
+                    price: 54,
+                    quantity: 200,
+                },
             ],
-            no: vec![
-                PriceLevel { price: 46, quantity: 150 },
-            ],
+            no: vec![PriceLevel {
+                price: 46,
+                quantity: 150,
+            }],
             seq: 1,
         };
 
@@ -544,7 +550,10 @@ mod tests {
         // Apply initial snapshot
         let snapshot = OrderbookSnapshot {
             market_ticker: "KXBTC".to_string(),
-            yes: vec![PriceLevel { price: 55, quantity: 100 }],
+            yes: vec![PriceLevel {
+                price: 55,
+                quantity: 100,
+            }],
             no: vec![],
             seq: 1,
         };

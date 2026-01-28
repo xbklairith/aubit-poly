@@ -25,7 +25,7 @@ impl Platform {
     pub fn fee_rate(&self) -> Decimal {
         match self {
             Platform::Polymarket => Decimal::ZERO,
-            Platform::Kalshi => dec!(0.01), // 1%
+            Platform::Kalshi => dec!(0.01),       // 1%
             Platform::Limitless => Decimal::ZERO, // 0% fees
         }
     }
@@ -53,7 +53,7 @@ impl Platform {
     pub fn has_websocket_orderbook(&self) -> bool {
         match self {
             Platform::Polymarket => true,
-            Platform::Kalshi => false, // REST polling only
+            Platform::Kalshi => false,   // REST polling only
             Platform::Limitless => true, // WebSocket orderbook support
         }
     }
@@ -61,9 +61,9 @@ impl Platform {
     /// Get recommended price staleness threshold in seconds.
     pub fn max_price_staleness_secs(&self) -> i64 {
         match self {
-            Platform::Polymarket => 5,  // WebSocket - expect fresh data
-            Platform::Kalshi => 10,     // REST polling - allow more staleness
-            Platform::Limitless => 5,   // WebSocket - expect fresh data
+            Platform::Polymarket => 5, // WebSocket - expect fresh data
+            Platform::Kalshi => 10,    // REST polling - allow more staleness
+            Platform::Limitless => 5,  // WebSocket - expect fresh data
         }
     }
 
@@ -427,7 +427,7 @@ mod tests {
             asset: "BTC".to_string(),
             timeframe: "15m".to_string(),
             end_time: Utc::now() + chrono::Duration::hours(1),
-            yes_best_ask: Some(dec!(0.50)),  // Cheaper YES
+            yes_best_ask: Some(dec!(0.50)), // Cheaper YES
             yes_best_bid: Some(dec!(0.48)),
             no_best_ask: Some(dec!(0.52)),
             no_best_bid: Some(dec!(0.50)),
@@ -449,7 +449,7 @@ mod tests {
             end_time: Utc::now() + chrono::Duration::hours(1),
             yes_best_ask: Some(dec!(0.55)),
             yes_best_bid: Some(dec!(0.53)),
-            no_best_ask: Some(dec!(0.44)),  // Cheaper NO
+            no_best_ask: Some(dec!(0.44)), // Cheaper NO
             no_best_bid: Some(dec!(0.42)),
             liquidity: Some(dec!(500)),
             price_updated_at: Some(Utc::now()),

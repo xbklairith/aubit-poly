@@ -108,16 +108,18 @@ impl KalshiMarket {
 
     /// Get NO bid price - use direct field if available, else calculate from YES ask
     pub fn no_bid_dollars(&self) -> Option<Decimal> {
-        self.no_bid
-            .map(|c| Decimal::new(c as i64, 2))
-            .or_else(|| self.yes_ask.map(|c| Decimal::ONE - Decimal::new(c as i64, 2)))
+        self.no_bid.map(|c| Decimal::new(c as i64, 2)).or_else(|| {
+            self.yes_ask
+                .map(|c| Decimal::ONE - Decimal::new(c as i64, 2))
+        })
     }
 
     /// Get NO ask price - use direct field if available, else calculate from YES bid
     pub fn no_ask_dollars(&self) -> Option<Decimal> {
-        self.no_ask
-            .map(|c| Decimal::new(c as i64, 2))
-            .or_else(|| self.yes_bid.map(|c| Decimal::ONE - Decimal::new(c as i64, 2)))
+        self.no_ask.map(|c| Decimal::new(c as i64, 2)).or_else(|| {
+            self.yes_bid
+                .map(|c| Decimal::ONE - Decimal::new(c as i64, 2))
+        })
     }
 
     pub fn last_price_dollars(&self) -> Option<Decimal> {
@@ -129,7 +131,7 @@ impl KalshiMarket {
         self.liquidity_dollars
             .as_ref()
             .and_then(|s| s.parse::<Decimal>().ok())
-            .or_else(|| self.liquidity.map(|l| Decimal::new(l, 2)))  // liquidity is in cents
+            .or_else(|| self.liquidity.map(|l| Decimal::new(l, 2))) // liquidity is in cents
     }
 }
 
@@ -325,20 +327,20 @@ impl KalshiClient {
         // KXBTC = Bitcoin hourly, KXBTC15M = Bitcoin 15-minute, etc.
         let series_tickers = vec![
             // 15-minute up/down markets (match Polymarket 15m)
-            "KXBTC15M",  // Bitcoin 15m
-            "KXETH15M",  // Ethereum 15m
-            "KXSOL15M",  // Solana 15m
-            "KXXRP15M",  // XRP 15m
+            "KXBTC15M", // Bitcoin 15m
+            "KXETH15M", // Ethereum 15m
+            "KXSOL15M", // Solana 15m
+            "KXXRP15M", // XRP 15m
             // Hourly/daily markets
-            "KXBTC",     // Bitcoin
-            "KXETH",     // Ethereum
-            "KXSOL",     // Solana
-            "KXXRP",     // XRP
-            "KXDOGE",    // Dogecoin
-            "KXADA",     // Cardano
-            "INXBTC",    // Bitcoin (INX series)
-            "INXETH",    // Ethereum (INX series)
-            "INXSOL",    // Solana (INX series)
+            "KXBTC",  // Bitcoin
+            "KXETH",  // Ethereum
+            "KXSOL",  // Solana
+            "KXXRP",  // XRP
+            "KXDOGE", // Dogecoin
+            "KXADA",  // Cardano
+            "INXBTC", // Bitcoin (INX series)
+            "INXETH", // Ethereum (INX series)
+            "INXSOL", // Solana (INX series)
         ];
 
         for series in &series_tickers {
@@ -358,19 +360,17 @@ impl KalshiClient {
     }
 
     /// Fetch all markets for a specific series ticker.
-    async fn fetch_markets_by_series(&self, series: &str) -> Result<Vec<KalshiMarket>, KalshiError> {
+    async fn fetch_markets_by_series(
+        &self,
+        series: &str,
+    ) -> Result<Vec<KalshiMarket>, KalshiError> {
         let mut all_markets = Vec::new();
         let mut cursor: Option<String> = None;
         let max_iterations = 20; // Safety limit
 
         for _ in 0..max_iterations {
             let (markets, next_cursor) = self
-                .fetch_markets(
-                    Some("open"),
-                    Some(series),
-                    200,
-                    cursor.as_deref(),
-                )
+                .fetch_markets(Some("open"), Some(series), 200, cursor.as_deref())
                 .await?;
 
             if markets.is_empty() {
@@ -389,7 +389,11 @@ impl KalshiClient {
     }
 
     /// Fetch orderbook for a specific market ticker.
-    pub async fn fetch_orderbook(&self, ticker: &str, depth: i32) -> Result<KalshiOrderbook, KalshiError> {
+    pub async fn fetch_orderbook(
+        &self,
+        ticker: &str,
+        depth: i32,
+    ) -> Result<KalshiOrderbook, KalshiError> {
         self.rate_limit().await;
 
         let url = format!("{}/markets/{}/orderbook", self.base_url, ticker);
@@ -448,7 +452,10 @@ impl KalshiClient {
     }
 
     /// Fetch a single market by ticker.
-    async fn fetch_market_by_ticker(&self, ticker: &str) -> Result<Option<KalshiMarket>, KalshiError> {
+    async fn fetch_market_by_ticker(
+        &self,
+        ticker: &str,
+    ) -> Result<Option<KalshiMarket>, KalshiError> {
         self.rate_limit().await;
 
         let url = format!("{}/markets/{}", self.base_url, ticker);
@@ -484,7 +491,9 @@ impl KalshiClient {
     }
 
     /// Fetch all open crypto markets and parse them.
-    pub async fn fetch_parsed_crypto_markets(&self) -> Result<Vec<ParsedKalshiMarket>, KalshiError> {
+    pub async fn fetch_parsed_crypto_markets(
+        &self,
+    ) -> Result<Vec<ParsedKalshiMarket>, KalshiError> {
         let markets = self.fetch_all_crypto_markets().await?;
 
         let parsed: Vec<ParsedKalshiMarket> = markets
@@ -549,7 +558,8 @@ impl KalshiClient {
         };
 
         // Get strike price from floor_strike or cap_strike if strike_price is not set
-        let strike_price = market.strike_price
+        let strike_price = market
+            .strike_price
             .or(market.floor_strike)
             .or(market.cap_strike);
 
@@ -615,18 +625,26 @@ fn extract_timeframe_from_kalshi(ticker: &str, title: &str) -> String {
 
     // Check for specific timeframe indicators
     // Handle both "15 min" in title and "15M" in ticker (e.g., KXBTC15M)
-    if title_lower.contains("15 min") || title_lower.contains("15-minute") || title_lower.contains("15min")
+    if title_lower.contains("15 min")
+        || title_lower.contains("15-minute")
+        || title_lower.contains("15min")
         || ticker_lower.contains("15m")
     {
         return "15m".to_string();
     }
-    if title_lower.contains("1 hour") || title_lower.contains("hourly") || ticker_lower.contains("-1h") {
+    if title_lower.contains("1 hour")
+        || title_lower.contains("hourly")
+        || ticker_lower.contains("-1h")
+    {
         return "1h".to_string();
     }
     if title_lower.contains("4 hour") || ticker_lower.contains("-4h") {
         return "4h".to_string();
     }
-    if title_lower.contains("daily") || title_lower.contains("24 hour") || title_lower.contains("end of day") {
+    if title_lower.contains("daily")
+        || title_lower.contains("24 hour")
+        || title_lower.contains("end of day")
+    {
         return "daily".to_string();
     }
     if title_lower.contains("weekly") {
@@ -645,9 +663,15 @@ fn extract_timeframe_from_kalshi(ticker: &str, title: &str) -> String {
 }
 
 /// Classify Kalshi market type from title and subtitle.
-fn classify_kalshi_market(title: &str, subtitle: &Option<String>) -> (KalshiMarketType, Option<String>) {
+fn classify_kalshi_market(
+    title: &str,
+    subtitle: &Option<String>,
+) -> (KalshiMarketType, Option<String>) {
     let title_lower = title.to_lowercase();
-    let subtitle_lower = subtitle.as_ref().map(|s| s.to_lowercase()).unwrap_or_default();
+    let subtitle_lower = subtitle
+        .as_ref()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
 
     // Check for above/below pattern
     if title_lower.contains("above") || subtitle_lower.contains("above") {
@@ -671,17 +695,38 @@ mod tests {
 
     #[test]
     fn test_extract_asset_from_kalshi() {
-        assert_eq!(extract_asset_from_kalshi("KXBTC-25JAN13-T100000", "Bitcoin above $100,000?"), "BTC");
-        assert_eq!(extract_asset_from_kalshi("KXETH-25JAN13-T4000", "Ethereum above $4,000?"), "ETH");
-        assert_eq!(extract_asset_from_kalshi("INXSOL-25JAN13", "Solana price target"), "SOL");
-        assert_eq!(extract_asset_from_kalshi("RANDOM-TICKER", "Some random market"), "UNKNOWN");
+        assert_eq!(
+            extract_asset_from_kalshi("KXBTC-25JAN13-T100000", "Bitcoin above $100,000?"),
+            "BTC"
+        );
+        assert_eq!(
+            extract_asset_from_kalshi("KXETH-25JAN13-T4000", "Ethereum above $4,000?"),
+            "ETH"
+        );
+        assert_eq!(
+            extract_asset_from_kalshi("INXSOL-25JAN13", "Solana price target"),
+            "SOL"
+        );
+        assert_eq!(
+            extract_asset_from_kalshi("RANDOM-TICKER", "Some random market"),
+            "UNKNOWN"
+        );
     }
 
     #[test]
     fn test_extract_timeframe_from_kalshi() {
-        assert_eq!(extract_timeframe_from_kalshi("KXBTC", "Bitcoin 15 minute price"), "15m");
-        assert_eq!(extract_timeframe_from_kalshi("KXBTC-1H", "Bitcoin 1 hour prediction"), "1h");
-        assert_eq!(extract_timeframe_from_kalshi("KXBTC", "Bitcoin daily close above"), "daily");
+        assert_eq!(
+            extract_timeframe_from_kalshi("KXBTC", "Bitcoin 15 minute price"),
+            "15m"
+        );
+        assert_eq!(
+            extract_timeframe_from_kalshi("KXBTC-1H", "Bitcoin 1 hour prediction"),
+            "1h"
+        );
+        assert_eq!(
+            extract_timeframe_from_kalshi("KXBTC", "Bitcoin daily close above"),
+            "daily"
+        );
     }
 
     #[test]
@@ -709,10 +754,10 @@ mod tests {
             status: "open".to_string(),
             close_time: None,
             expiration_time: None,
-            yes_bid: Some(55),  // 55 cents
-            yes_ask: Some(60),  // 60 cents
-            no_bid: Some(40),   // 40 cents
-            no_ask: Some(45),   // 45 cents
+            yes_bid: Some(55), // 55 cents
+            yes_ask: Some(60), // 60 cents
+            no_bid: Some(40),  // 40 cents
+            no_ask: Some(45),  // 45 cents
             last_price: Some(57),
             volume: None,
             volume_24h: None,
@@ -728,10 +773,11 @@ mod tests {
             market_type: None,
         };
 
-        assert_eq!(market.yes_bid_dollars(), Some(Decimal::new(55, 2)));  // 0.55
-        assert_eq!(market.yes_ask_dollars(), Some(Decimal::new(60, 2)));  // 0.60
-        assert_eq!(market.no_bid_dollars(), Some(Decimal::new(40, 2)));   // 0.40
-        assert_eq!(market.no_ask_dollars(), Some(Decimal::new(45, 2)));   // 0.45
-        assert_eq!(market.get_liquidity_dollars(), Some(Decimal::new(1000, 2)));  // $10.00 (liquidity is in cents)
+        assert_eq!(market.yes_bid_dollars(), Some(Decimal::new(55, 2))); // 0.55
+        assert_eq!(market.yes_ask_dollars(), Some(Decimal::new(60, 2))); // 0.60
+        assert_eq!(market.no_bid_dollars(), Some(Decimal::new(40, 2))); // 0.40
+        assert_eq!(market.no_ask_dollars(), Some(Decimal::new(45, 2))); // 0.45
+        assert_eq!(market.get_liquidity_dollars(), Some(Decimal::new(1000, 2)));
+        // $10.00 (liquidity is in cents)
     }
 }
