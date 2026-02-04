@@ -43,6 +43,11 @@ pub struct PendingOrder {
     pub token_id: Option<String>,
     pub shares: Option<rust_decimal::Decimal>,
     pub price: Option<rust_decimal::Decimal>,
+    // Fields for settlement tracking (live trading)
+    pub condition_id: Option<String>,
+    pub yes_token_id: Option<String>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub asset: Option<String>,
 }
 
 /// Result of a cancel attempt, sent back from the spawned task.
@@ -60,6 +65,11 @@ pub struct CancelResult {
     pub token_id: Option<String>,
     pub shares: Option<rust_decimal::Decimal>,
     pub price: Option<rust_decimal::Decimal>,
+    // Market info for settlement tracking (live trading)
+    pub condition_id: Option<String>,
+    pub yes_token_id: Option<String>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub asset: Option<String>,
 }
 
 /// Manages pending orders and their auto-cancel tasks.
@@ -96,10 +106,22 @@ impl OrderManager {
         market_name: String,
         side: String,
     ) -> bool {
-        self.track_order_with_market_info(order_id, market_id, market_name, side, None, None, None)
+        self.track_order_with_market_info(
+            order_id,
+            market_id,
+            market_name,
+            side,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
-    /// Track a new order with market info for exit manager.
+    /// Track a new order with market info for exit manager and settlement tracking.
     ///
     /// Returns true if order was added, false if order_id already exists.
     #[allow(clippy::too_many_arguments)]
@@ -112,6 +134,10 @@ impl OrderManager {
         token_id: Option<String>,
         shares: Option<rust_decimal::Decimal>,
         price: Option<rust_decimal::Decimal>,
+        condition_id: Option<String>,
+        yes_token_id: Option<String>,
+        end_time: Option<DateTime<Utc>>,
+        asset: Option<String>,
     ) -> bool {
         if self.pending_orders.contains_key(&order_id) {
             warn!(
@@ -132,6 +158,10 @@ impl OrderManager {
             token_id: token_id.clone(),
             shares,
             price,
+            condition_id: condition_id.clone(),
+            yes_token_id: yes_token_id.clone(),
+            end_time,
+            asset: asset.clone(),
         };
 
         self.pending_orders.insert(order_id.clone(), order);
@@ -145,6 +175,10 @@ impl OrderManager {
         let tid = token_id;
         let sh = shares;
         let pr = price;
+        let cid = condition_id;
+        let ytid = yes_token_id;
+        let et = end_time;
+        let ast = asset;
 
         self.cancel_tasks.spawn(async move {
             tokio::time::sleep(Duration::from_secs(timeout)).await;
@@ -160,10 +194,7 @@ impl OrderManager {
                 Ok(size_matched) => {
                     let filled = size_matched > dec!(0);
                     if filled {
-                        info!(
-                            "[FILLED] Order {} was filled: {} shares",
-                            oid, size_matched
-                        );
+                        info!("[FILLED] Order {} was filled: {} shares", oid, size_matched);
                     } else {
                         info!(
                             "[CANCEL] Order {} cancelled after {}s timeout (0 filled)",
@@ -200,6 +231,10 @@ impl OrderManager {
                 token_id: tid,
                 shares: if was_filled { Some(filled_amount) } else { sh },
                 price: pr,
+                condition_id: cid,
+                yes_token_id: ytid,
+                end_time: et,
+                asset: ast,
             }
         });
 

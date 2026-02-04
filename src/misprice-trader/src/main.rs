@@ -9,11 +9,11 @@
 //! 4. Auto-cancel order after 10 seconds if not filled
 //! 5. Only trade once per market (first qualifying flip)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -26,6 +26,38 @@ use common::{
     BinanceEvent, BinanceStreamType, BinanceWsClient, CachedAuth, Config, Database,
     DryRunPortfolio, GammaClient, KlineBuffer, SimulatedPosition,
 };
+
+/// Tracks a live position for settlement resolution.
+///
+/// Unlike ExitManager positions, these survive past exit failures and
+/// are used to query on-chain settlement outcomes for expired markets.
+#[derive(Debug, Clone)]
+struct LivePosition {
+    yes_token_id: String,
+    side: String,
+    shares: Decimal,
+    cost: Decimal,
+    end_time: DateTime<Utc>,
+    market_name: String,
+    /// Whether this position was successfully exited via trailing stop/take profit
+    exited: bool,
+    /// Number of resolution fetch attempts
+    resolution_retries: u32,
+    /// Last time we attempted to fetch resolution
+    last_retry_time: Option<DateTime<Utc>>,
+}
+
+/// Maximum resolution retry attempts before force-expiring a live position
+const MAX_LIVE_RESOLUTION_RETRIES: u32 = 30;
+
+/// Calculate backoff delay in seconds based on retry count.
+/// Uses exponential backoff: 60s, 120s, 240s... capped at 600s (10 min)
+fn live_resolution_backoff_secs(retries: u32) -> i64 {
+    let base_delay = 60i64;
+    let max_delay = 600i64;
+    let delay = base_delay * (1i64 << retries.min(4));
+    delay.min(max_delay)
+}
 
 mod detector;
 mod exit_manager;
@@ -195,6 +227,9 @@ async fn main() -> Result<()> {
         .take_profit_pct
         .map(|tp| Decimal::try_from(tp).unwrap_or(dec!(0)));
     let mut exit_manager = ExitManager::new(trailing_stop_pct, take_profit_pct, args.dry_run);
+    // Live position tracker for settlement resolution (live mode only)
+    // Key is (market_id, side) to support both YES and NO on the same market
+    let mut live_positions: HashMap<(Uuid, String), LivePosition> = HashMap::new();
 
     // Connect to Binance WebSocket (Both = bookTicker for real-time + klines for history)
     let binance_client =
@@ -221,8 +256,8 @@ async fn main() -> Result<()> {
             }
             _ = heartbeat_interval.tick() => {
                 // Heartbeat: print metrics and portfolio summary
-                info!("[ALIVE] Heartbeat - klines received: {}, markets tracked: {}, active positions: {}",
-                    klines_since_heartbeat, detector.tracked_count(), exit_manager.position_count());
+                info!("[ALIVE] Heartbeat - klines received: {}, markets tracked: {}, active positions: {}, live tracked: {}",
+                    klines_since_heartbeat, detector.tracked_count(), exit_manager.position_count(), live_positions.len());
                 klines_since_heartbeat = 0;
                 metrics.print_summary();
                 if exit_manager.is_enabled() {
@@ -232,6 +267,10 @@ async fn main() -> Result<()> {
                     portfolio.print_summary();
                     // Resolve expired positions during heartbeat
                     portfolio.resolve_expired(db.pool(), &gamma).await;
+                }
+                // Resolve expired live positions during heartbeat (live mode)
+                if !args.dry_run {
+                    resolve_live_settlements(&mut live_positions, &gamma, &mut metrics).await;
                 }
             }
             event_opt = binance_ws.next_event() => {
@@ -266,6 +305,7 @@ async fn main() -> Result<()> {
                                 &mut traded_positions,
                                 &mut order_manager,
                                 &mut exit_manager,
+                                &mut live_positions,
                                 limit_price,
                                 position_size,
                             ).await;
@@ -323,6 +363,24 @@ async fn main() -> Result<()> {
     if args.dry_run {
         portfolio.print_summary();
     }
+    if !args.dry_run && !live_positions.is_empty() {
+        let unresolved: Vec<_> = live_positions.values().filter(|p| !p.exited).collect();
+        if !unresolved.is_empty() {
+            info!(
+                "[SHUTDOWN] {} unresolved live positions (will settle on-chain):",
+                unresolved.len()
+            );
+            for pos in unresolved {
+                info!(
+                    "  {} {} | cost: ${:.2} | expires: {}",
+                    pos.side,
+                    pos.market_name,
+                    pos.cost,
+                    pos.end_time.format("%H:%M:%S UTC")
+                );
+            }
+        }
+    }
 
     binance_ws.close().await;
     info!("Shutdown complete");
@@ -343,6 +401,7 @@ async fn run_cycle(
     traded_positions: &mut HashSet<(Uuid, String)>,
     order_manager: &mut OrderManager,
     exit_manager: &mut ExitManager,
+    live_positions: &mut HashMap<(Uuid, String), LivePosition>,
     limit_price: Decimal,
     position_size: Decimal,
 ) {
@@ -372,6 +431,49 @@ async fn run_cycle(
                     warn!(
                         "[EXIT_MGR] Missing market info for filled order {} {}, cannot track",
                         result.market_id, result.side
+                    );
+                }
+            }
+
+            // Track in live positions for settlement resolution (live mode)
+            if !args.dry_run {
+                if let (Some(shares), Some(price), Some(yes_token_id), Some(end_time)) = (
+                    result.shares,
+                    result.price,
+                    &result.yes_token_id,
+                    result.end_time,
+                ) {
+                    if yes_token_id.is_empty() {
+                        warn!(
+                            "[LIVE_TRACK] Missing yes_token_id for {} {}, cannot track settlement",
+                            result.market_name, result.side
+                        );
+                    } else {
+                        let cost = shares * price;
+                        let key = (result.market_id, result.side.clone());
+                        live_positions.insert(
+                            key,
+                            LivePosition {
+                                yes_token_id: yes_token_id.clone(),
+                                side: result.side.clone(),
+                                shares,
+                                cost,
+                                end_time,
+                                market_name: result.market_name.clone(),
+                                exited: false,
+                                resolution_retries: 0,
+                                last_retry_time: None,
+                            },
+                        );
+                        debug!(
+                            "[LIVE_TRACK] Tracking position: {} {} @ ${:.3} ({:.2} shares)",
+                            result.market_name, result.side, price, shares
+                        );
+                    }
+                } else {
+                    warn!(
+                        "[LIVE_TRACK] Missing metadata for {} {}, cannot track settlement",
+                        result.market_name, result.side
                     );
                 }
             }
@@ -429,6 +531,17 @@ async fn run_cycle(
             metrics.record_exit(&exit);
             if args.dry_run && exit.success {
                 portfolio.close_position(exit.market_id, exit.exit_price, exit.pnl);
+            }
+            // Mark live position as exited so settlement doesn't double-count
+            if !args.dry_run && exit.success {
+                let key = (exit.market_id, exit.side.clone());
+                if let Some(pos) = live_positions.get_mut(&key) {
+                    pos.exited = true;
+                    debug!(
+                        "[LIVE_TRACK] Marked {} {} as exited (trailing stop/take profit)",
+                        pos.market_name, pos.side
+                    );
+                }
             }
         }
     }
@@ -628,7 +741,7 @@ async fn run_cycle(
                         detector.mark_traded(&market.id);
                         metrics.record_trade(&market.asset, side);
 
-                        // Track order with market info for exit manager
+                        // Track order with market info for exit manager and settlement
                         order_manager.track_order_with_market_info(
                             order_id,
                             market.id,
@@ -637,6 +750,10 @@ async fn run_cycle(
                             Some(token_id.clone()),
                             Some(shares),
                             Some(limit_price),
+                            Some(market.condition_id.clone()),
+                            Some(market.yes_token_id.clone()),
+                            Some(market.end_time),
+                            Some(market.asset.clone()),
                         );
                     }
                     Err(e) => {
@@ -656,5 +773,157 @@ async fn run_cycle(
             "Cleaned {} expired positions from tracking",
             before - traded_positions.len()
         );
+    }
+}
+
+/// Resolve expired live positions by querying Gamma API for settlement outcomes.
+///
+/// Only processes positions that:
+/// - Were NOT already exited via trailing stop/take profit
+/// - Have expired (end_time + 60s buffer < now)
+/// - Are within retry limits
+async fn resolve_live_settlements(
+    live_positions: &mut HashMap<(Uuid, String), LivePosition>,
+    gamma: &GammaClient,
+    metrics: &mut Metrics,
+) {
+    let now = Utc::now();
+    let expired_cutoff = now - chrono::Duration::seconds(60);
+
+    // Collect expired unexited position keys to process
+    let expired_keys: Vec<(Uuid, String)> = live_positions
+        .iter()
+        .filter(|(_, p)| !p.exited && p.end_time < expired_cutoff)
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    if expired_keys.is_empty() {
+        // Still clean up stale exited positions
+        live_positions.retain(|_, p| !(p.exited && p.end_time < expired_cutoff));
+        return;
+    }
+
+    // Clean up exited positions that have expired (no longer needed)
+    live_positions.retain(|_, p| !(p.exited && p.end_time < expired_cutoff));
+
+    let mut api_calls = 0u32;
+
+    for key in expired_keys {
+        let pos = match live_positions.get(&key) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Check backoff
+        let backoff_secs = live_resolution_backoff_secs(pos.resolution_retries);
+        if let Some(last_retry) = pos.last_retry_time {
+            let elapsed = (now - last_retry).num_seconds();
+            if elapsed < backoff_secs {
+                continue;
+            }
+        }
+
+        // Rate limit API calls (max 2 per second)
+        if api_calls > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        api_calls += 1;
+
+        match gamma.fetch_market_resolution(&pos.yes_token_id).await {
+            Ok(Some(winning_side)) => {
+                let winning_side = winning_side.to_uppercase();
+                if winning_side != "YES" && winning_side != "NO" {
+                    // Treat as unresolved - increment retries to avoid infinite loop
+                    let pos = live_positions.get_mut(&key).unwrap();
+                    pos.resolution_retries += 1;
+                    pos.last_retry_time = Some(now);
+                    warn!(
+                        "[SETTLEMENT] Invalid winning_side '{}' for {} (retry {}/{})",
+                        winning_side,
+                        pos.market_name,
+                        pos.resolution_retries,
+                        MAX_LIVE_RESOLUTION_RETRIES
+                    );
+                    if pos.resolution_retries >= MAX_LIVE_RESOLUTION_RETRIES {
+                        warn!(
+                            "[SETTLEMENT] ⚠️ EXPIRED: {} - max retries exceeded with invalid resolution, treating as loss (-${:.2})",
+                            pos.market_name, pos.cost
+                        );
+                        metrics.record_settlement(-pos.cost, false);
+                        live_positions.remove(&key);
+                    }
+                    continue;
+                }
+
+                let we_won = pos.side.to_uppercase() == winning_side;
+                let pnl = if we_won {
+                    // Win: payout = shares ($1 per share), profit = shares - cost
+                    pos.shares - pos.cost
+                } else {
+                    // Loss: lose entire cost
+                    -pos.cost
+                };
+
+                metrics.record_settlement(pnl, we_won);
+
+                if we_won {
+                    info!(
+                        "[SETTLEMENT] ✅ WIN: {} {} -> +${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pnl, winning_side
+                    );
+                } else {
+                    info!(
+                        "[SETTLEMENT] ❌ LOSS: {} {} -> -${:.2} (resolved: {})",
+                        pos.side, pos.market_name, pos.cost, winning_side
+                    );
+                }
+
+                live_positions.remove(&key);
+            }
+            Ok(None) => {
+                // Not resolved yet, retry next heartbeat
+                let pos = live_positions.get_mut(&key).unwrap();
+                pos.resolution_retries += 1;
+                pos.last_retry_time = Some(now);
+
+                if pos.resolution_retries >= MAX_LIVE_RESOLUTION_RETRIES {
+                    warn!(
+                        "[SETTLEMENT] ⚠️ EXPIRED: {} - max retries ({}) exceeded, treating as loss (-${:.2})",
+                        pos.market_name, MAX_LIVE_RESOLUTION_RETRIES, pos.cost
+                    );
+                    metrics.record_settlement(-pos.cost, false);
+                    live_positions.remove(&key);
+                } else {
+                    let next_backoff = live_resolution_backoff_secs(pos.resolution_retries);
+                    debug!(
+                        "[SETTLEMENT] {} not yet resolved (retry {}/{}, next in {}s)",
+                        pos.market_name,
+                        pos.resolution_retries,
+                        MAX_LIVE_RESOLUTION_RETRIES,
+                        next_backoff
+                    );
+                }
+            }
+            Err(e) => {
+                // API error, retry with backoff
+                let pos = live_positions.get_mut(&key).unwrap();
+                pos.resolution_retries += 1;
+                pos.last_retry_time = Some(now);
+
+                if pos.resolution_retries >= MAX_LIVE_RESOLUTION_RETRIES {
+                    warn!(
+                        "[SETTLEMENT] ⚠️ EXPIRED: {} - max retries ({}) exceeded after API errors, treating as loss (-${:.2})",
+                        pos.market_name, MAX_LIVE_RESOLUTION_RETRIES, pos.cost
+                    );
+                    metrics.record_settlement(-pos.cost, false);
+                    live_positions.remove(&key);
+                } else {
+                    warn!(
+                        "[SETTLEMENT] Failed to fetch resolution for {} (retry {}/{}): {}",
+                        pos.market_name, pos.resolution_retries, MAX_LIVE_RESOLUTION_RETRIES, e
+                    );
+                }
+            }
+        }
     }
 }

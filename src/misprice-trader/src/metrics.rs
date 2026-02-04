@@ -28,6 +28,12 @@ pub struct Metrics {
     exits_take_profit: u32,
     /// Total realized P&L from exits
     total_realized_pnl: Decimal,
+    /// Settlement wins (expired positions that won)
+    settled_wins: u32,
+    /// Settlement losses (expired positions that lost)
+    settled_losses: u32,
+    /// Total P&L from expired position settlements
+    settled_pnl: Decimal,
     /// Total errors
     errors: u32,
     /// Database errors
@@ -46,6 +52,9 @@ impl Metrics {
             exits_trailing_stop: 0,
             exits_take_profit: 0,
             total_realized_pnl: dec!(0),
+            settled_wins: 0,
+            settled_losses: 0,
+            settled_pnl: dec!(0),
             errors: 0,
             db_errors: 0,
         }
@@ -96,6 +105,16 @@ impl Metrics {
         }
     }
 
+    /// Record a settlement resolution for an expired position.
+    pub fn record_settlement(&mut self, pnl: Decimal, won: bool) {
+        self.settled_pnl += pnl;
+        if won {
+            self.settled_wins += 1;
+        } else {
+            self.settled_losses += 1;
+        }
+    }
+
     /// Get total exits.
     pub fn total_exits(&self) -> u32 {
         self.exits_trailing_stop + self.exits_take_profit
@@ -137,7 +156,18 @@ impl Metrics {
         info!("  Trailing Stops:    {:>8}", self.exits_trailing_stop);
         info!("  Take Profits:      {:>8}", self.exits_take_profit);
         info!("  Total Exits:       {:>8}", total_exits);
-        info!("  Realized P&L:      ${:<8.2}", self.total_realized_pnl);
+        info!("  Exit P&L:          ${:<8.2}", self.total_realized_pnl);
+        info!("---------------------------------------------------------------");
+        info!("  SETTLEMENT METRICS:");
+        info!("  Settled Wins:      {:>8}", self.settled_wins);
+        info!("  Settled Losses:    {:>8}", self.settled_losses);
+        info!("  Settlement P&L:    ${:<8.2}", self.settled_pnl);
+        info!("---------------------------------------------------------------");
+        let total_pnl = self.total_realized_pnl + self.settled_pnl;
+        info!(
+            "  TOTAL P&L:         ${:<8.2}  (exits + settlements)",
+            total_pnl
+        );
         info!("---------------------------------------------------------------");
         info!("  Errors:            {:>8}", self.errors);
         info!("  DB Errors:         {:>8}", self.db_errors);
