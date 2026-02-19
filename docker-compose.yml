@@ -35,9 +35,9 @@ services:
     command: >
       --hybrid
       --crypto-hours 1
-      --crypto-limit 100
+      --crypto-limit 500
       --event-limit 0
-      --reconnect-interval 300
+      --reconnect-interval 30
     restart: unless-stopped
     networks:
       - aubit-net
