@@ -165,7 +165,7 @@ services:
     command: >
       --trailing-stop-pct 0.10
       --limit-price 0.40
-      --position-size 8
+      --position-size 12
       --max-expiry-minutes 15
       --min-expiry-minutes 1
       --max-orderbook-age 1

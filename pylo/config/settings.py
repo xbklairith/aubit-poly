@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Blockchain/Web3 (for position redemption)
     wallet_private_key: SecretStr = SecretStr("")
-    polygon_rpc_url: str = "https://polygon-rpc.com"
+    polygon_rpc_url: str = "https://polygon-bor-rpc.publicnode.com"
 
     # Kalshi
     kalshi_api_key: SecretStr = SecretStr("")
