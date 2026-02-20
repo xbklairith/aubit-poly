@@ -12,8 +12,8 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use common::{
-    deactivate_expired_markets, upsert_market, upsert_kalshi_market,
-    Config, Database, GammaClient, KalshiClient, KalshiMarketInsert,
+    deactivate_expired_markets, upsert_kalshi_market, upsert_market, Config, Database, GammaClient,
+    KalshiClient, KalshiMarketInsert,
 };
 
 /// Market Scanner - discovers and tracks prediction markets
@@ -143,7 +143,10 @@ async fn scan_markets(
     let mut kalshi_upserted = 0;
     for market in &kalshi_markets {
         // Filter by asset
-        if !kalshi_assets.iter().any(|a| a.eq_ignore_ascii_case(&market.asset)) {
+        if !kalshi_assets
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&market.asset))
+        {
             continue;
         }
 

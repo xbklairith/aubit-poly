@@ -18,9 +18,9 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use common::{
+    get_latest_orderbook_snapshot, get_platform_markets_with_prices, update_polymarket_prices,
     Config, CrossPlatformOpportunity, Database, GammaClient, MarketWithPlatform, Platform,
-    UnifiedMarket, get_platform_markets_with_prices, update_polymarket_prices,
-    get_latest_orderbook_snapshot,
+    UnifiedMarket,
 };
 use rust_decimal::Decimal;
 use tokio::time::sleep;
@@ -89,7 +89,11 @@ async fn main() -> Result<()> {
     info!("Cross-Platform Arbitrage Detector starting...");
     info!(
         "Mode: {}",
-        if args.once { "single run" } else { "continuous" }
+        if args.once {
+            "single run"
+        } else {
+            "continuous"
+        }
     );
     info!("Scan interval: {}s", args.interval);
     info!(
@@ -99,7 +103,11 @@ async fn main() -> Result<()> {
     info!("Assets: {}", args.assets);
 
     // Parse assets
-    let assets: Vec<String> = args.assets.split(',').map(|s| s.trim().to_string()).collect();
+    let assets: Vec<String> = args
+        .assets
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
 
     // Load configuration
     let config = Config::from_env()?;
@@ -183,14 +191,16 @@ async fn scan_cycle(
     // Step 2b: If no fresh WebSocket data, fetch prices via Gamma REST API
     if polymarket_markets.is_empty() {
         info!("No fresh WebSocket data - fetching Polymarket prices via REST...");
-        if let Err(e) = update_polymarket_prices_from_gamma(db, gamma, assets, args.max_expiry_secs).await {
+        if let Err(e) =
+            update_polymarket_prices_from_gamma(db, gamma, assets, args.max_expiry_secs).await
+        {
             warn!("Failed to fetch Polymarket prices via REST: {}", e);
         }
         // Try fetching again with the new prices
         polymarket_markets = get_platform_markets_with_prices(
             db.pool(),
             "polymarket",
-            args.max_orderbook_age + 5,  // Allow slightly more staleness for REST
+            args.max_orderbook_age + 5, // Allow slightly more staleness for REST
             assets,
             args.max_expiry_secs,
         )
@@ -255,7 +265,7 @@ async fn scan_cycle(
             "Opportunity #{}: {} vs {} | Buy YES on {} @ {} + NO on {} @ {} = {} | Net: {:.2}%{}",
             i + 1,
             opp.pair.polymarket.name,
-            opp.pair.kalshi.name,  // Note: This is actually Limitless market (field name kept for compatibility)
+            opp.pair.kalshi.name, // Note: This is actually Limitless market (field name kept for compatibility)
             opp.buy_yes_on,
             opp.yes_price,
             opp.buy_no_on,
@@ -297,7 +307,7 @@ fn to_unified_market(m: &MarketWithPlatform, platform: Platform) -> Option<Unifi
         price_updated_at: m.captured_at,
         direction: m.direction.clone(),
         strike_price: m.strike_price,
-        yes_depth: None,  // Loaded on demand for opportunities
+        yes_depth: None, // Loaded on demand for opportunities
         no_depth: None,
     })
 }
@@ -342,7 +352,9 @@ async fn update_polymarket_prices_from_gamma(
                     market.yes_best_bid,
                     market.no_best_ask,
                     market.no_best_bid,
-                ).await {
+                )
+                .await
+                {
                     warn!("Failed to update prices for {}: {}", market.name, e);
                 } else {
                     updated_count += 1;
@@ -379,7 +391,10 @@ async fn calculate_opportunity_size(
     let yes_depth = match fetch_market_depth(db, yes_market, "yes").await {
         Some(d) => d,
         None => {
-            warn!("Failed to fetch YES depth for {} on {:?}", yes_market.name, yes_market.platform);
+            warn!(
+                "Failed to fetch YES depth for {} on {:?}",
+                yes_market.name, yes_market.platform
+            );
             return None;
         }
     };
@@ -388,7 +403,10 @@ async fn calculate_opportunity_size(
     let no_depth = match fetch_market_depth(db, no_market, "no").await {
         Some(d) => d,
         None => {
-            warn!("Failed to fetch NO depth for {} on {:?}", no_market.name, no_market.platform);
+            warn!(
+                "Failed to fetch NO depth for {} on {:?}",
+                no_market.name, no_market.platform
+            );
             return None;
         }
     };
@@ -398,13 +416,7 @@ async fn calculate_opportunity_size(
     let yes_fee = opp.buy_yes_on.fee_rate();
     let no_fee = opp.buy_no_on.fee_rate();
 
-    let result = calculate_max_profitable_size(
-        &yes_depth,
-        &no_depth,
-        yes_fee,
-        no_fee,
-        min_profit,
-    )?;
+    let result = calculate_max_profitable_size(&yes_depth, &no_depth, yes_fee, no_fee, min_profit)?;
 
     // Calculate total investment
     let investment = result.total_cost_a + result.total_cost_b + result.total_fees;
@@ -432,11 +444,17 @@ async fn fetch_market_depth(
             let snapshot = match get_latest_orderbook_snapshot(db.pool(), db_id).await {
                 Ok(Some(s)) => s,
                 Ok(None) => {
-                    warn!("No orderbook snapshot found for {:?} market {}", market.platform, market.name);
+                    warn!(
+                        "No orderbook snapshot found for {:?} market {}",
+                        market.platform, market.name
+                    );
                     return None;
                 }
                 Err(e) => {
-                    warn!("Error fetching orderbook snapshot for {}: {}", market.name, e);
+                    warn!(
+                        "Error fetching orderbook snapshot for {}: {}",
+                        market.name, e
+                    );
                     return None;
                 }
             };
@@ -462,7 +480,10 @@ async fn fetch_market_depth(
 
             let depth = parse_polymarket_depth(&json_depth);
             if depth.asks.is_empty() {
-                warn!("Parsed empty {} depth for {:?} {}", side, market.platform, market.name);
+                warn!(
+                    "Parsed empty {} depth for {:?} {}",
+                    side, market.platform, market.name
+                );
                 return None;
             }
             Some(depth)

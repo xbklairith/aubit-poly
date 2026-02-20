@@ -13,8 +13,8 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use common::{
-    run_kalshi_orderbook_stream, update_kalshi_prices, Config, Database,
-    KalshiClient, KalshiOrderbookUpdate,
+    run_kalshi_orderbook_stream, update_kalshi_prices, Config, Database, KalshiClient,
+    KalshiOrderbookUpdate,
 };
 
 /// Kalshi Orderbook Stream - real-time orderbook data via WebSocket
@@ -83,13 +83,11 @@ async fn main() -> Result<()> {
 
     // Get Kalshi API credentials (optional - public data doesn't require auth)
     let api_key = std::env::var("KALSHI_API_KEY").ok();
-    let private_key_pem = std::env::var("KALSHI_PRIVATE_KEY_PEM")
-        .ok()
-        .or_else(|| {
-            std::env::var("KALSHI_PRIVATE_KEY_PATH")
-                .ok()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-        });
+    let private_key_pem = std::env::var("KALSHI_PRIVATE_KEY_PEM").ok().or_else(|| {
+        std::env::var("KALSHI_PRIVATE_KEY_PATH")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+    });
 
     if api_key.is_some() && private_key_pem.is_some() {
         info!("Using authenticated Kalshi WebSocket connection");
@@ -145,11 +143,7 @@ async fn run_stream(
 
     let filtered_markets: Vec<_> = kalshi_markets
         .into_iter()
-        .filter(|m| {
-            assets
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case(&m.asset))
-        })
+        .filter(|m| assets.iter().any(|a| a.eq_ignore_ascii_case(&m.asset)))
         .filter(|m| m.close_time <= max_expiry)
         .collect();
 

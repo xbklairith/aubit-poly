@@ -285,7 +285,11 @@ impl MispriceDetector {
             let traded_str = if state.has_traded { "[TRADED]" } else { "" };
 
             // Extract short name (first part before " - ")
-            let short_name = state.market_name.split(" - ").next().unwrap_or(&state.market_name);
+            let short_name = state
+                .market_name
+                .split(" - ")
+                .next()
+                .unwrap_or(&state.market_name);
 
             match (current_price, price_change) {
                 (Some(curr), Some((change, pct))) => {
@@ -305,11 +309,7 @@ impl MispriceDetector {
                 _ => {
                     info!(
                         "  {} | {} | Open: ${:.2} | Now: (no price) | Debounce: {} {}",
-                        short_name,
-                        dir_str,
-                        state.open_price,
-                        debounce_str,
-                        traded_str
+                        short_name, dir_str, state.open_price, debounce_str, traded_str
                     );
                 }
             }

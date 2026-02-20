@@ -46,10 +46,10 @@ impl Default for MatcherConfig {
     fn default() -> Self {
         Self {
             min_confidence: 0.90,
-            time_tolerance_15m: 300,      // 5 minutes
-            time_tolerance_1h: 600,       // 10 minutes
-            time_tolerance_daily: 3600,   // 1 hour
-            price_tolerance_pct: 0.01,    // 1%
+            time_tolerance_15m: 300,    // 5 minutes
+            time_tolerance_1h: 600,     // 10 minutes
+            time_tolerance_daily: 3600, // 1 hour
+            price_tolerance_pct: 0.01,  // 1%
         }
     }
 }
@@ -77,7 +77,10 @@ impl EventMatcher {
             let d_lower = d.to_lowercase();
             if d_lower.contains("up") || d_lower.contains("above") || d_lower.contains("higher") {
                 "up".to_string()
-            } else if d_lower.contains("down") || d_lower.contains("below") || d_lower.contains("lower") {
+            } else if d_lower.contains("down")
+                || d_lower.contains("below")
+                || d_lower.contains("lower")
+            {
                 "down".to_string()
             } else {
                 d_lower
@@ -123,7 +126,7 @@ impl EventMatcher {
         if a.timeframe == b.timeframe {
             score += 0.20;
         } else if self.timeframes_compatible(&a.timeframe, &b.timeframe) {
-            score += 0.10;  // Partial credit for compatible timeframes
+            score += 0.10; // Partial credit for compatible timeframes
         }
 
         // Direction match
@@ -140,12 +143,12 @@ impl EventMatcher {
                     score += 0.15;
                 }
             }
-            (None, None) => score += 0.10,  // Both unknown, partial credit
+            (None, None) => score += 0.10, // Both unknown, partial credit
             // One has direction, one doesn't - give partial credit for "up_down" markets
             // Polymarket "Up or Down" (None) should match Kalshi "up" markets
             (None, Some(dir)) | (Some(dir), None) => {
                 if dir == "up" || dir == "down" || dir == "above" || dir == "below" {
-                    score += 0.15;  // High partial credit - likely same event
+                    score += 0.15; // High partial credit - likely same event
                 }
             }
         }
@@ -168,7 +171,7 @@ impl EventMatcher {
             if price_diff <= tolerance {
                 score += 0.10;
             } else if price_diff <= tolerance * 2.0 {
-                score += 0.05;  // Partial credit for close prices
+                score += 0.05; // Partial credit for close prices
             }
         }
 
@@ -283,7 +286,6 @@ impl EventMatcher {
                 let score = self.score_match(poly_entity, kalshi_entity);
 
                 if score >= self.config.min_confidence {
-
                     if best_match.as_ref().map_or(true, |(_, s, _)| score > *s) {
                         let reason = self.generate_match_reason(poly_entity, kalshi_entity, score);
                         best_match = Some((*kalshi_idx, score, reason));
@@ -306,12 +308,7 @@ impl EventMatcher {
     }
 
     /// Generate human-readable match reason.
-    fn generate_match_reason(
-        &self,
-        a: &MarketEntity,
-        b: &MarketEntity,
-        score: f64,
-    ) -> String {
+    fn generate_match_reason(&self, a: &MarketEntity, b: &MarketEntity, score: f64) -> String {
         let mut reasons = Vec::new();
 
         reasons.push(format!("Asset: {}", a.asset));
@@ -389,7 +386,11 @@ mod tests {
         let entity_b = matcher.extract_entity(&kalshi);
 
         let score = matcher.score_match(&entity_a, &entity_b);
-        assert!(score >= 0.95, "Exact match should score 0.95+, got {}", score);
+        assert!(
+            score >= 0.95,
+            "Exact match should score 0.95+, got {}",
+            score
+        );
     }
 
     #[test]
@@ -404,7 +405,11 @@ mod tests {
         let entity_b = matcher.extract_entity(&kalshi);
 
         let score = matcher.score_match(&entity_a, &entity_b);
-        assert!(score >= 0.90, "up/above should be equivalent, got {}", score);
+        assert!(
+            score >= 0.90,
+            "up/above should be equivalent, got {}",
+            score
+        );
     }
 
     #[test]
@@ -426,10 +431,11 @@ mod tests {
     fn test_time_tolerance() {
         let matcher = EventMatcher::new();
         let end_time = Utc::now() + Duration::hours(1);
-        let end_time_offset = end_time + Duration::minutes(3);  // 3 minutes apart
+        let end_time_offset = end_time + Duration::minutes(3); // 3 minutes apart
 
         let poly = create_test_market(Platform::Polymarket, "BTC", "15m", end_time, Some("up"));
-        let kalshi = create_test_market(Platform::Kalshi, "BTC", "15m", end_time_offset, Some("up"));
+        let kalshi =
+            create_test_market(Platform::Kalshi, "BTC", "15m", end_time_offset, Some("up"));
 
         let entity_a = matcher.extract_entity(&poly);
         let entity_b = matcher.extract_entity(&kalshi);
@@ -437,7 +443,11 @@ mod tests {
         let score = matcher.score_match(&entity_a, &entity_b);
         // Score is ~0.82 due to time penalty (180s diff in 300s tolerance = 40% penalty on time component)
         // This is still above the default 0.90 min_confidence when end times match exactly
-        assert!(score >= 0.80, "3-minute diff in 15m market should score 0.80+, got {}", score);
+        assert!(
+            score >= 0.80,
+            "3-minute diff in 15m market should score 0.80+, got {}",
+            score
+        );
     }
 
     #[test]

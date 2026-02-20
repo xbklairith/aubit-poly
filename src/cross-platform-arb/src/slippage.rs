@@ -269,9 +269,9 @@ mod tests {
         let result = calculate_max_profitable_size(
             &yes_depth,
             &no_depth,
-            Decimal::ZERO,    // Polymarket 0% fee
-            dec!(0.01),       // Kalshi 1% fee
-            dec!(1.0),        // 1% min profit
+            Decimal::ZERO, // Polymarket 0% fee
+            dec!(0.01),    // Kalshi 1% fee
+            dec!(1.0),     // 1% min profit
         );
 
         assert!(result.is_some());

@@ -33,14 +33,14 @@ pub struct DetectorConfig {
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
-            min_profit_pct: dec!(3.5),         // 3.5% for standard markets
-            min_profit_pct_15m: dec!(1.0),     // 1% for 15-minute markets
-            min_liquidity: dec!(500),          // $500 minimum
-            min_liquidity_15m: dec!(100),      // $100 for 15-minute markets
-            min_time_to_resolution: 3600,      // 1 hour minimum
-            min_time_to_resolution_15m: 30,    // 30 seconds for 15-minute markets
-            max_price_staleness: 30,           // 30 seconds max price age
-            min_match_confidence: 0.90,        // 90% match confidence
+            min_profit_pct: dec!(3.5),      // 3.5% for standard markets
+            min_profit_pct_15m: dec!(1.0),  // 1% for 15-minute markets
+            min_liquidity: dec!(500),       // $500 minimum
+            min_liquidity_15m: dec!(100),   // $100 for 15-minute markets
+            min_time_to_resolution: 3600,   // 1 hour minimum
+            min_time_to_resolution_15m: 30, // 30 seconds for 15-minute markets
+            max_price_staleness: 30,        // 30 seconds max price age
+            min_match_confidence: 0.90,     // 90% match confidence
         }
     }
 }
@@ -65,7 +65,10 @@ impl CrossPlatformDetector {
     pub fn scan(&self, pairs: &[MarketPair]) -> Vec<CrossPlatformOpportunity> {
         let mut opportunities = Vec::new();
 
-        info!("Scanning {} market pairs for arbitrage opportunities", pairs.len());
+        info!(
+            "Scanning {} market pairs for arbitrage opportunities",
+            pairs.len()
+        );
 
         for pair in pairs {
             // Apply filters
@@ -167,7 +170,7 @@ impl CrossPlatformDetector {
                 let age = Utc::now() - updated_at;
                 age.num_seconds() <= self.config.max_price_staleness
             }
-            None => false,  // No timestamp means stale
+            None => false, // No timestamp means stale
         }
     }
 
@@ -241,10 +244,7 @@ impl ScanSummary {
     pub fn log(&self) {
         info!(
             "Scan complete: {} Polymarket, {} Limitless, {} matches, {} opportunities",
-            self.polymarket_count,
-            self.kalshi_count,
-            self.matches_found,
-            self.opportunities_found
+            self.polymarket_count, self.kalshi_count, self.matches_found, self.opportunities_found
         );
         if let Some(best) = self.best_profit_pct {
             info!("Best opportunity: {:.2}% profit", best);
@@ -290,7 +290,7 @@ mod tests {
             asset: "BTC".to_string(),
             timeframe: timeframe.to_string(),
             end_time,
-            yes_best_ask: Some(yes_poly + dec!(0.05)),  // More expensive YES
+            yes_best_ask: Some(yes_poly + dec!(0.05)), // More expensive YES
             yes_best_bid: Some(yes_poly + dec!(0.03)),
             no_best_ask: Some(no_kalshi),
             no_best_bid: Some(no_kalshi - dec!(0.02)),
