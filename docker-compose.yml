@@ -170,6 +170,31 @@ services:
       --min-expiry-minutes 1
       --max-orderbook-age 1
       --assets BTC,ETH,SOL,XRP
+      --timeframes 15m
+    restart: unless-stopped
+    networks:
+      - aubit-net
+
+  misprice-trader-trailing-5m:
+    build:
+      context: .
+      dockerfile: Dockerfile.trade-executor
+    container_name: misprice-trader-trailing-5m
+    entrypoint: ["misprice-trader"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+      RUST_LOG: info
+    command: >
+      --trailing-stop-pct 0.10
+      --limit-price 0.45
+      --position-size 5
+      --max-expiry-minutes 5
+      --min-expiry-minutes 1
+      --max-orderbook-age 1
+      --assets BTC,ETH,SOL,XRP
+      --timeframes 5m
     restart: unless-stopped
     networks:
       - aubit-net

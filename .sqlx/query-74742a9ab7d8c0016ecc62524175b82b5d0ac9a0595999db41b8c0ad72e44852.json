@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, captured_at\n            FROM orderbook_snapshots\n            WHERE yes_updated_at > $1\n              AND no_updated_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.asset = ANY($2)\n          AND m.timeframe = '15m'\n          AND m.market_type = 'up_down'\n          AND m.end_time > NOW()\n          AND m.end_time <= $3\n        ORDER BY m.end_time ASC\n        ",
+  "query": "\n        SELECT\n            m.id,\n            m.condition_id,\n            m.market_type,\n            m.asset,\n            m.timeframe,\n            m.yes_token_id,\n            m.no_token_id,\n            m.name,\n            m.end_time,\n            COALESCE(m.is_active, true) as \"is_active!\",\n            o.yes_best_ask,\n            o.yes_best_bid,\n            o.no_best_ask,\n            o.no_best_bid,\n            o.yes_asks,\n            o.no_asks,\n            o.captured_at as \"captured_at!\"\n        FROM markets m\n        INNER JOIN (\n            SELECT DISTINCT ON (market_id)\n                market_id, yes_best_ask, yes_best_bid, no_best_ask, no_best_bid,\n                yes_asks, no_asks, captured_at\n            FROM orderbook_snapshots\n            WHERE yes_updated_at > $1\n              AND no_updated_at > $1\n            ORDER BY market_id, captured_at DESC\n        ) o ON o.market_id = m.id\n        WHERE m.is_active = true\n          AND m.asset = ANY($2)\n          AND m.timeframe = ANY($4)\n          AND m.market_type = 'up_down'\n          AND m.end_time > NOW()\n          AND m.end_time <= $3\n        ORDER BY m.end_time ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -75,6 +75,16 @@
       },
       {
         "ordinal": 14,
+        "name": "yes_asks",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 15,
+        "name": "no_asks",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
         "name": "captured_at!",
         "type_info": "Timestamptz"
       }
@@ -83,7 +93,8 @@
       "Left": [
         "Timestamptz",
         "TextArray",
-        "Timestamptz"
+        "Timestamptz",
+        "TextArray"
       ]
     },
     "nullable": [
@@ -101,8 +112,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "14ad47c25494d09d1bc14d7e8b582cb113719d9cbc542332de8b44d264787f4b"
+  "hash": "74742a9ab7d8c0016ecc62524175b82b5d0ac9a0595999db41b8c0ad72e44852"
 }

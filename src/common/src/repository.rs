@@ -701,16 +701,18 @@ pub async fn get_markets_with_fresh_orderbooks(
     Ok(results)
 }
 
-/// Get 15-minute up/down markets with fresh orderbooks.
+/// Get short-timeframe (5m/15m) up/down markets with fresh orderbooks.
 /// Used by the contrarian scalper to target specific market types.
 pub async fn get_15m_updown_markets_with_fresh_orderbooks(
     pool: &PgPool,
     max_age_seconds: i32,
     assets: &[String],
     max_expiry_seconds: i64,
+    timeframes: &[String],
 ) -> Result<Vec<MarketWithPrices>, sqlx::Error> {
     let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
     let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+    let timeframes = timeframes.to_vec();
 
     let results = sqlx::query_as!(
         MarketWithPrices,
@@ -742,7 +744,7 @@ pub async fn get_15m_updown_markets_with_fresh_orderbooks(
         ) o ON o.market_id = m.id
         WHERE m.is_active = true
           AND m.asset = ANY($2)
-          AND m.timeframe = '15m'
+          AND m.timeframe = ANY($4)
           AND m.market_type = 'up_down'
           AND m.end_time > NOW()
           AND m.end_time <= $3
@@ -751,6 +753,7 @@ pub async fn get_15m_updown_markets_with_fresh_orderbooks(
         snapshot_cutoff,
         assets,
         expiry_cutoff,
+        &timeframes,
     )
     .fetch_all(pool)
     .await?;
@@ -758,16 +761,18 @@ pub async fn get_15m_updown_markets_with_fresh_orderbooks(
     Ok(results)
 }
 
-/// Get 15-minute up/down markets with full orderbook depth.
+/// Get short-timeframe (5m/15m) up/down markets with full orderbook depth.
 /// Includes yes_asks and no_asks for realistic fill price calculation.
 pub async fn get_15m_updown_markets_with_orderbooks(
     pool: &PgPool,
     max_age_seconds: i32,
     assets: &[String],
     max_expiry_seconds: i64,
+    timeframes: &[String],
 ) -> Result<Vec<MarketWithOrderbook>, sqlx::Error> {
     let snapshot_cutoff = Utc::now() - chrono::Duration::seconds(max_age_seconds as i64);
     let expiry_cutoff = Utc::now() + chrono::Duration::seconds(max_expiry_seconds);
+    let timeframes = timeframes.to_vec();
 
     let results = sqlx::query_as!(
         MarketWithOrderbook,
@@ -802,7 +807,7 @@ pub async fn get_15m_updown_markets_with_orderbooks(
         ) o ON o.market_id = m.id
         WHERE m.is_active = true
           AND m.asset = ANY($2)
-          AND m.timeframe = '15m'
+          AND m.timeframe = ANY($4)
           AND m.market_type = 'up_down'
           AND m.end_time > NOW()
           AND m.end_time <= $3
@@ -811,6 +816,7 @@ pub async fn get_15m_updown_markets_with_orderbooks(
         snapshot_cutoff,
         assets,
         expiry_cutoff,
+        &timeframes,
     )
     .fetch_all(pool)
     .await?;
@@ -1233,7 +1239,7 @@ pub async fn upsert_kalshi_market(
         market.end_time,
         market.rules_primary,
         market.liquidity,
-        market.strike_price,
+        market.strike_price.map(|p| p as i64),
         market.direction,
     )
     .fetch_one(pool)
@@ -1288,7 +1294,7 @@ pub async fn get_markets_by_platform(
             m.end_time,
             COALESCE(m.is_active, true) as "is_active!",
             m.direction,
-            m.strike_price,
+            m.strike_price::float8 as "strike_price: f64",
             m.liquidity_dollars,
             NULL::DECIMAL as yes_best_ask,
             NULL::DECIMAL as yes_best_bid,
@@ -1336,7 +1342,7 @@ pub async fn get_platform_markets_with_prices(
             m.end_time,
             COALESCE(m.is_active, true) as "is_active!",
             m.direction,
-            m.strike_price,
+            m.strike_price::float8 as "strike_price: f64",
             m.liquidity_dollars,
             o.yes_best_ask,
             o.yes_best_bid,

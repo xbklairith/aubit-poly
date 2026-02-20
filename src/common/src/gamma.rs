@@ -622,6 +622,41 @@ fn extract_asset(question: &str) -> String {
     "UNKNOWN".to_string()
 }
 
+/// Parse minute difference from a time range like "1:00pm-1:05pm" → 5
+fn parse_time_range_minutes(s: &str) -> Option<i32> {
+    // Find pattern: H:MM followed by am/pm, then dash, then H:MM followed by am/pm
+    // e.g. "1:00pm-1:05pm" or "9:30am-9:35am"
+    let s = s.to_lowercase();
+    let dash_pos = s.find("m-")?; // find "am-" or "pm-"
+    let before = &s[..dash_pos + 1]; // up to and including 'am'/'pm'
+    let after = &s[dash_pos + 2..]; // after the dash
+
+    // Parse first time: find last H:MM before am/pm
+    let (h1, m1) = parse_hhmm_before_ampm(before)?;
+    // Parse second time: find first H:MM before am/pm
+    let (h2, m2) = parse_hhmm_before_ampm(after)?;
+
+    Some((h2 * 60 + m2) - (h1 * 60 + m1))
+}
+
+/// Extract H:MM from a string ending with "am"/"pm", e.g. "... 1:05pm" → (1, 5)
+fn parse_hhmm_before_ampm(s: &str) -> Option<(i32, i32)> {
+    let s = s.trim();
+    // Find the colon
+    let colon = s.rfind(':')?;
+    // Minutes are the 2 chars after colon
+    let min_str = &s[colon + 1..colon + 3];
+    let minutes: i32 = min_str.parse().ok()?;
+    // Hour is digits before colon
+    let before_colon = &s[..colon];
+    let hour_start = before_colon
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let hours: i32 = before_colon[hour_start..].parse().ok()?;
+    Some((hours, minutes))
+}
+
 /// Extract timeframe from market question.
 fn extract_timeframe(question: &str) -> String {
     let question_lower = question.to_lowercase();
@@ -644,11 +679,16 @@ fn extract_timeframe(question: &str) -> String {
         return "15m".to_string();
     }
 
-    // Check for time range pattern (15-minute markets): contains patterns like "pm-" followed by time
-    // e.g., "1:30pm-1:45pm" or "2:00pm-2:15pm"
+    // Check for time range pattern: "1:00pm-1:05pm" (5m) or "1:00pm-1:15pm" (15m)
+    // Parse the minute difference to distinguish 5m vs 15m
     if (question_lower.contains("pm-") || question_lower.contains("am-"))
         && question_lower.contains(":")
     {
+        if let Some(diff) = parse_time_range_minutes(&question_lower) {
+            if diff == 5 {
+                return "5m".to_string();
+            }
+        }
         return "15m".to_string();
     }
 
@@ -746,6 +786,18 @@ mod tests {
         assert_eq!(extract_timeframe("ETH 4 hour prediction"), "4h");
         assert_eq!(extract_timeframe("Daily BTC movement"), "daily");
         assert_eq!(extract_timeframe("Weekly ETH outlook"), "weekly");
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 20, 1:00PM-1:05PM ET"),
+            "5m"
+        );
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 20, 1:00PM-1:15PM ET"),
+            "15m"
+        );
+        assert_eq!(
+            extract_timeframe("Solana Up or Down - February 20, 9:30AM-9:35AM ET"),
+            "5m"
+        );
     }
 
     #[test]

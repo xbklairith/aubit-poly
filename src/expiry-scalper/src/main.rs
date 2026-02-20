@@ -748,11 +748,13 @@ async fn run_cycle(
 
     // For 15m up/down markets, use orderbook depth for realistic fill prices
     if args.only_15m_updown {
+        let all_timeframes = vec!["5m".to_string(), "15m".to_string()];
         let markets = match get_15m_updown_markets_with_orderbooks(
             db.pool(),
             args.max_orderbook_age,
             assets,
             expiry_seconds,
+            &all_timeframes,
         )
         .await
         {

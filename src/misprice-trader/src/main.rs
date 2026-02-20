@@ -113,6 +113,10 @@ struct Args {
     /// Take profit percentage (exit immediately when profit exceeds this). Optional.
     #[arg(long)]
     take_profit_pct: Option<f64>,
+
+    /// Timeframes to trade (comma-separated, e.g. "5m,15m"). Default: "5m,15m"
+    #[arg(long, default_value = "5m,15m")]
+    timeframes: String,
 }
 
 /// Map of asset -> Binance symbol. Returns None for unsupported assets.
@@ -172,6 +176,7 @@ async fn main() -> Result<()> {
             info!("Take profit: {:.1}%", tp * 100.0);
         }
     }
+    info!("Timeframes: {}", args.timeframes);
     info!("Dry run: {}", args.dry_run);
 
     // Load config and connect to database
@@ -192,6 +197,18 @@ async fn main() -> Result<()> {
 
     if assets.is_empty() {
         anyhow::bail!("No valid assets specified");
+    }
+
+    // Parse timeframes
+    let timeframes: Vec<String> = args
+        .timeframes
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if timeframes.is_empty() {
+        anyhow::bail!("No valid timeframes specified");
     }
 
     // Build Binance symbols list
@@ -296,6 +313,7 @@ async fn main() -> Result<()> {
                             run_cycle(
                                 &db,
                                 &assets,
+                                &timeframes,
                                 &args,
                                 &kline_buffer,
                                 &mut detector,
@@ -323,6 +341,7 @@ async fn main() -> Result<()> {
                                 args.max_orderbook_age,
                                 &assets,
                                 expiry_seconds,
+                                &timeframes,
                             ).await {
                                 let active_ids: Vec<Uuid> = markets.iter().map(|m| m.id).collect();
                                 detector.cleanup_expired(&active_ids);
@@ -392,6 +411,7 @@ async fn main() -> Result<()> {
 async fn run_cycle(
     db: &Database,
     assets: &[String],
+    timeframes: &[String],
     args: &Args,
     kline_buffer: &KlineBuffer,
     detector: &mut MispriceDetector,
@@ -497,6 +517,7 @@ async fn run_cycle(
         args.max_orderbook_age,
         assets,
         expiry_seconds,
+        timeframes,
     )
     .await
     {
@@ -548,8 +569,16 @@ async fn run_cycle(
 
     // Process each market
     for market in &markets {
-        // Calculate market start time (15 minutes before end_time)
-        let start_time = market.end_time - chrono::Duration::minutes(15);
+        // Calculate market start time based on timeframe
+        let timeframe_minutes: i64 = match market.timeframe.as_str() {
+            "5m" => 5,
+            "15m" => 15,
+            other => {
+                warn!("Unknown timeframe '{}' for {}, skipping", other, market.name);
+                continue;
+            }
+        };
+        let start_time = market.end_time - chrono::Duration::minutes(timeframe_minutes);
 
         // Get Binance symbol for this asset
         let binance_symbol = match asset_to_binance_symbol(&market.asset) {

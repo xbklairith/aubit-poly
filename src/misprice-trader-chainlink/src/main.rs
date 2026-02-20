@@ -316,11 +316,13 @@ async fn main() -> Result<()> {
 
                             // Get active market IDs for detector cleanup
                             let expiry_seconds = args.max_expiry_minutes * 60;
+                            let all_timeframes = vec!["5m".to_string(), "15m".to_string()];
                             if let Ok(markets) = get_15m_updown_markets_with_orderbooks(
                                 db.pool(),
                                 args.max_orderbook_age,
                                 &assets,
                                 expiry_seconds,
+                                &all_timeframes,
                             ).await {
                                 let active_ids: Vec<Uuid> = markets.iter().map(|m| m.id).collect();
                                 detector.cleanup_expired(&active_ids);
@@ -427,11 +429,13 @@ async fn run_cycle(
     let expiry_seconds = args.max_expiry_minutes * 60;
     let min_expiry_seconds = args.min_expiry_minutes * 60;
 
+    let all_timeframes = vec!["5m".to_string(), "15m".to_string()];
     let markets = match get_15m_updown_markets_with_orderbooks(
         db.pool(),
         args.max_orderbook_age,
         assets,
         expiry_seconds,
+        &all_timeframes,
     )
     .await
     {
@@ -472,8 +476,16 @@ async fn run_cycle(
 
     // Process each market
     for market in &markets {
-        // Calculate market start time (15 minutes before end_time)
-        let start_time = market.end_time - chrono::Duration::minutes(15);
+        // Calculate market start time based on timeframe
+        let timeframe_minutes: i64 = match market.timeframe.as_str() {
+            "5m" => 5,
+            "15m" => 15,
+            other => {
+                warn!("Unknown timeframe '{}' for {}, skipping", other, market.name);
+                continue;
+            }
+        };
+        let start_time = market.end_time - chrono::Duration::minutes(timeframe_minutes);
 
         // Get Chainlink symbol for this asset
         let chainlink_symbol = match asset_to_chainlink_symbol(&market.asset) {
