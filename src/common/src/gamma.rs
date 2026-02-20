@@ -26,25 +26,25 @@ pub enum GammaError {
 /// Known crypto series IDs for Up/Down markets (all timeframes)
 pub const CRYPTO_SERIES: &[(&str, &str)] = &[
     // BTC Up or Down
-    ("10193", "BTC Up or Down 5m"),
+    ("10684", "BTC Up or Down 5m"),
     ("10192", "BTC Up or Down 15m"),
     ("10114", "BTC Up or Down 1h"),
     ("10194", "BTC Up or Down 4h"),
     ("10115", "BTC Up or Down Daily"),
     // ETH Up or Down
-    ("10190", "ETH Up or Down 5m"),
+    ("10683", "ETH Up or Down 5m"),
     ("10191", "ETH Up or Down 15m"),
     ("10117", "ETH Up or Down 1h"),
     ("10195", "ETH Up or Down 4h"),
     ("10118", "ETH Up or Down Daily"),
     // SOL Up or Down
-    ("10424", "SOL Up or Down 5m"),
+    ("10686", "SOL Up or Down 5m"),
     ("10423", "SOL Up or Down 15m"),
     ("10122", "SOL Up or Down 1h"),
     ("10425", "SOL Up or Down 4h"),
     ("10121", "SOL Up or Down Daily"),
     // XRP Up or Down
-    ("10421", "XRP Up or Down 5m"),
+    ("10685", "XRP Up or Down 5m"),
     ("10422", "XRP Up or Down 15m"),
     ("10123", "XRP Up or Down 1h"),
     ("10426", "XRP Up or Down 4h"),
