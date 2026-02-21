@@ -1,14 +1,24 @@
+# Extension: single Rust build definition (built once, shared by all Rust services)
+x-rust-image: &rust-image
+  image: aubit-rust:latest
+  build:
+    context: .
+    dockerfile: Dockerfile.trade-executor
+
+x-rust-env: &rust-env
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
+    RUST_LOG: info
+  networks:
+    - aubit-net
+
 services:
   # trade-executor:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.trade-executor
+  #   <<: *rust-image
+  #   <<: *rust-env
   #   container_name: trade-executor
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-  #     RUST_LOG: info
   #   command: >
   #     --dry-run=false
   #     --verbose-timing
@@ -18,20 +28,12 @@ services:
   #     --min-profit 0.02
   #     --max-position-size 10
   #   restart: unless-stopped
-  #   networks:
-  #     - aubit-net
 
+  # This service triggers the single Rust image build
   orderbook-stream:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    <<: [*rust-image, *rust-env]
     container_name: orderbook-stream
     entrypoint: ["orderbook-stream"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --hybrid
       --crypto-hours 1
@@ -39,56 +41,32 @@ services:
       --event-limit 0
       --reconnect-interval 30
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   market-scanner:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: market-scanner
     entrypoint: ["market-scanner"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: --interval 60
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   # expiry-scalper:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.trade-executor
+  #   image: aubit-rust:latest
+  #   <<: *rust-env
   #   container_name: expiry-scalper
   #   entrypoint: ["expiry-scalper"]
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-  #     RUST_LOG: info
   #   command: >
   #     --interval-secs 10
   #     --expiry-minutes 3
   #     --position-size 5
   #     --high-threshold 0.75
   #   restart: unless-stopped
-  #   networks:
-  #     - aubit-net
 
   contrarian-scalper:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: contrarian-scalper
     entrypoint: ["expiry-scalper"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --interval-secs 5
       --expiry-minutes 1
@@ -99,20 +77,12 @@ services:
       --only-15m-updown
       --dry-run
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   momentum-trader:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: momentum-trader
     entrypoint: ["momentum-trader"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --dry-run
       --min-momentum 0.002
@@ -125,20 +95,12 @@ services:
       --max-orderbook-age 1
       --assets BTC,ETH,SOL,XRP
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   misprice-trader:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: misprice-trader
     entrypoint: ["misprice-trader"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --dry-run
       --limit-price 0.40
@@ -148,20 +110,12 @@ services:
       --max-orderbook-age 1
       --assets BTC
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   misprice-trader-trailing:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: misprice-trader-trailing
     entrypoint: ["misprice-trader"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --trailing-stop-pct 0.10
       --limit-price 0.40
@@ -172,23 +126,15 @@ services:
       --assets BTC,ETH,SOL,XRP
       --timeframes 15m
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   misprice-trader-trailing-5m:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: misprice-trader-trailing-5m
     entrypoint: ["misprice-trader"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --trailing-stop-pct 0.10
-      --limit-price 0.45
+      --limit-price 0.40
       --position-size 5
       --max-expiry-minutes 5
       --min-expiry-minutes 1
@@ -196,20 +142,12 @@ services:
       --assets BTC,ETH,SOL,XRP
       --timeframes 5m
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   misprice-trader-chainlink:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: misprice-trader-chainlink
     entrypoint: ["misprice-trader-chainlink"]
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: >
       --dry-run
       --limit-price 0.40
@@ -219,13 +157,9 @@ services:
       --max-orderbook-age 1
       --assets BTC,ETH,SOL,XRP
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   poly-check:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
     container_name: poly-check
     entrypoint: ["poly-check"]
     env_file:
@@ -238,20 +172,12 @@ services:
       - aubit-net
 
   audit-prices:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
+    <<: *rust-env
     container_name: audit-prices
     entrypoint: []
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-      RUST_LOG: info
     command: ["sh", "-c", "while true; do poly-check --audit-prices --audit-limit 20 --audit-assets BTC,ETH,SOL,XRP; echo '--- Sleeping 30s ---'; sleep 30; done"]
     restart: unless-stopped
-    networks:
-      - aubit-net
 
   position-redeemer:
     build:
@@ -266,9 +192,7 @@ services:
       - aubit-net
 
   cross-platform-arb:
-    build:
-      context: .
-      dockerfile: Dockerfile.trade-executor
+    image: aubit-rust:latest
     container_name: cross-platform-arb
     entrypoint: ["cross-platform-arb"]
     env_file:
@@ -304,23 +228,15 @@ services:
       - aubit-net
 
   # kalshi-orderbook-stream:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.trade-executor
+  #   image: aubit-rust:latest
+  #   <<: *rust-env
   #   container_name: kalshi-orderbook-stream
   #   entrypoint: ["kalshi-orderbook-stream"]
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DATABASE_URL: postgresql://aubit:aubit_dev_password@aubit-poly-db:5432/aubit_poly
-  #     RUST_LOG: info
   #   command: >
   #     --max-expiry-hours 2
   #     --refresh-interval 300
   #     --assets BTC,ETH,SOL,XRP
   #   restart: unless-stopped
-  #   networks:
-  #     - aubit-net
 
 networks:
   aubit-net:

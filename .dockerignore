@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# Python bytecode
+__pycache__
+*.pyc
+.venv
+
+# Documentation
+docx/
+
+# Environment & config
+.env
+.env.*
+
+# Docker compose files (not needed inside builds)
+docker-compose*.yml
+
+# IDE
+.vscode/
+.idea/
+
+# Rust build artifacts (use Docker layer cache instead)
+target/
