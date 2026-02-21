@@ -133,6 +133,7 @@ services:
     container_name: misprice-trader-trailing-5m
     entrypoint: ["misprice-trader"]
     command: >
+      --dry-run
       --trailing-stop-pct 0.10
       --limit-price 0.40
       --position-size 5
