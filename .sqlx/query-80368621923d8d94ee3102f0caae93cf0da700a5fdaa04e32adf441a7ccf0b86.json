@@ -19,7 +19,7 @@
         "Timestamptz",
         "Text",
         "Numeric",
-        "Int8",
+        "Float8",
         "Varchar"
       ]
     },

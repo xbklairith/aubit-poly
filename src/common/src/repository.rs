@@ -1239,7 +1239,7 @@ pub async fn upsert_kalshi_market(
         market.end_time,
         market.rules_primary,
         market.liquidity,
-        market.strike_price.map(|p| p as i64),
+        market.strike_price,
         market.direction,
     )
     .fetch_one(pool)

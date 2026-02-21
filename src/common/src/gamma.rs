@@ -625,23 +625,36 @@ fn extract_asset(question: &str) -> String {
 /// Parse minute difference from a time range like "1:00pm-1:05pm" → 5
 fn parse_time_range_minutes(s: &str) -> Option<i32> {
     // Find pattern: H:MM followed by am/pm, then dash, then H:MM followed by am/pm
-    // e.g. "1:00pm-1:05pm" or "9:30am-9:35am"
+    // e.g. "1:00pm-1:05pm" or "12:55pm-1:00pm"
     let s = s.to_lowercase();
     let dash_pos = s.find("m-")?; // find "am-" or "pm-"
     let before = &s[..dash_pos + 1]; // up to and including 'am'/'pm'
     let after = &s[dash_pos + 2..]; // after the dash
 
-    // Parse first time: find last H:MM before am/pm
-    let (h1, m1) = parse_hhmm_before_ampm(before)?;
-    // Parse second time: find first H:MM before am/pm
-    let (h2, m2) = parse_hhmm_before_ampm(after)?;
+    let t1 = parse_hhmm_before_ampm(before)?;
+    let t2 = parse_hhmm_before_ampm(after)?;
 
-    Some((h2 * 60 + m2) - (h1 * 60 + m1))
+    let mins1 = t1.0 * 60 + t1.1;
+    let mins2 = t2.0 * 60 + t2.1;
+
+    // Handle wrapping (e.g. 12:55pm -> 1:00pm where 24h is 775 -> 780)
+    let diff = if mins2 >= mins1 {
+        mins2 - mins1
+    } else {
+        // Wrapped past 12 -> 1 in 12h format (already converted to 24h),
+        // should not happen, but guard anyway
+        (mins2 + 24 * 60) - mins1
+    };
+
+    Some(diff)
 }
 
-/// Extract H:MM from a string ending with "am"/"pm", e.g. "... 1:05pm" → (1, 5)
+/// Extract H:MM from a string containing "am"/"pm", converting to 24-hour format.
+/// e.g. "... 1:05pm" → (13, 5), "... 12:55pm" → (12, 55), "... 12:00am" → (0, 0)
+/// Handles trailing text like "1:05pm et" by searching for "pm"/"am" anywhere.
 fn parse_hhmm_before_ampm(s: &str) -> Option<(i32, i32)> {
     let s = s.trim();
+    let is_pm = s.contains("pm");
     // Find the colon
     let colon = s.rfind(':')?;
     // Minutes are the 2 chars after colon
@@ -653,7 +666,15 @@ fn parse_hhmm_before_ampm(s: &str) -> Option<(i32, i32)> {
         .rfind(|c: char| !c.is_ascii_digit())
         .map(|i| i + 1)
         .unwrap_or(0);
-    let hours: i32 = before_colon[hour_start..].parse().ok()?;
+    let mut hours: i32 = before_colon[hour_start..].parse().ok()?;
+
+    // Convert 12-hour to 24-hour
+    if is_pm && hours != 12 {
+        hours += 12;
+    } else if !is_pm && hours == 12 {
+        hours = 0;
+    }
+
     Some((hours, minutes))
 }
 
@@ -680,14 +701,18 @@ fn extract_timeframe(question: &str) -> String {
     }
 
     // Check for time range pattern: "1:00pm-1:05pm" (5m) or "1:00pm-1:15pm" (15m)
-    // Parse the minute difference to distinguish 5m vs 15m
+    // Parse the minute difference to determine actual timeframe
     if (question_lower.contains("pm-") || question_lower.contains("am-"))
         && question_lower.contains(":")
     {
         if let Some(diff) = parse_time_range_minutes(&question_lower) {
-            if diff == 5 {
-                return "5m".to_string();
-            }
+            return match diff {
+                5 => "5m".to_string(),
+                15 => "15m".to_string(),
+                60 => "1h".to_string(),
+                240 => "4h".to_string(),
+                _ => format!("{}m", diff),
+            };
         }
         return "15m".to_string();
     }
@@ -797,6 +822,92 @@ mod tests {
         assert_eq!(
             extract_timeframe("Solana Up or Down - February 20, 9:30AM-9:35AM ET"),
             "5m"
+        );
+    }
+
+    #[test]
+    fn test_parse_hhmm_before_ampm_24h_conversion() {
+        // Basic PM conversion
+        assert_eq!(parse_hhmm_before_ampm("1:05pm"), Some((13, 5)));
+        assert_eq!(parse_hhmm_before_ampm("11:30pm"), Some((23, 30)));
+        // 12 PM stays 12
+        assert_eq!(parse_hhmm_before_ampm("12:00pm"), Some((12, 0)));
+        assert_eq!(parse_hhmm_before_ampm("12:55pm"), Some((12, 55)));
+        // Basic AM - no conversion
+        assert_eq!(parse_hhmm_before_ampm("1:05am"), Some((1, 5)));
+        assert_eq!(parse_hhmm_before_ampm("9:30am"), Some((9, 30)));
+        // 12 AM becomes 0
+        assert_eq!(parse_hhmm_before_ampm("12:00am"), Some((0, 0)));
+        assert_eq!(parse_hhmm_before_ampm("12:05am"), Some((0, 5)));
+        // With trailing text (e.g. " et")
+        assert_eq!(parse_hhmm_before_ampm("1:05pm et"), Some((13, 5)));
+        assert_eq!(parse_hhmm_before_ampm("10:15pm et"), Some((22, 15)));
+        assert_eq!(parse_hhmm_before_ampm("12:55pm et"), Some((12, 55)));
+        // With leading text
+        assert_eq!(
+            parse_hhmm_before_ampm("february 21, 10:00pm"),
+            Some((22, 0))
+        );
+    }
+
+    #[test]
+    fn test_parse_time_range_minutes() {
+        // Same hour, same AM/PM
+        assert_eq!(parse_time_range_minutes("1:00pm-1:05pm"), Some(5));
+        assert_eq!(parse_time_range_minutes("1:00pm-1:15pm"), Some(15));
+        assert_eq!(parse_time_range_minutes("9:30am-9:35am"), Some(5));
+        // Cross-hour within PM (the original bug case)
+        assert_eq!(parse_time_range_minutes("12:55pm-1:00pm"), Some(5));
+        assert_eq!(parse_time_range_minutes("12:45pm-1:00pm"), Some(15));
+        // Cross-hour within AM
+        assert_eq!(parse_time_range_minutes("12:00am-12:05am"), Some(5));
+        // AM to PM boundary
+        assert_eq!(parse_time_range_minutes("11:55am-12:00pm"), Some(5));
+        assert_eq!(parse_time_range_minutes("11:45am-12:00pm"), Some(15));
+        // Double-digit PM hours
+        assert_eq!(parse_time_range_minutes("10:00pm-10:15pm"), Some(15));
+        assert_eq!(parse_time_range_minutes("10:00pm-10:05pm"), Some(5));
+        assert_eq!(parse_time_range_minutes("10:45pm-11:00pm"), Some(15));
+    }
+
+    #[test]
+    fn test_extract_timeframe_with_trailing_et() {
+        // These are real Polymarket market names — trailing " ET" after the time
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 21, 12:55PM-1:00PM ET"),
+            "5m"
+        );
+        assert_eq!(
+            extract_timeframe("XRP Up or Down - February 21, 1:30PM-1:35PM ET"),
+            "5m"
+        );
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 21, 10:00PM-10:15PM ET"),
+            "15m"
+        );
+        assert_eq!(
+            extract_timeframe("Solana Up or Down - February 21, 10:45PM-11:00PM ET"),
+            "15m"
+        );
+        assert_eq!(
+            extract_timeframe("Ethereum Up or Down - February 21, 11:55AM-12:00PM ET"),
+            "5m"
+        );
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 21, 12:00AM-12:05AM ET"),
+            "5m"
+        );
+    }
+
+    #[test]
+    fn test_extract_timeframe_1h_from_time_range() {
+        assert_eq!(
+            extract_timeframe("Bitcoin Up or Down - February 21, 1:00PM-2:00PM ET"),
+            "1h"
+        );
+        assert_eq!(
+            extract_timeframe("ETH Up or Down - February 21, 11:00AM-12:00PM ET"),
+            "1h"
         );
     }
 
